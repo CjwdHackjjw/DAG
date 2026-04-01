@@ -167,6 +167,7 @@ class NodeParameters:
         try:
             inputs += [json['header_size']]
             inputs += [json['max_header_delay']]
+            inputs += [json['freeze_check_interval']]
             inputs += [json['gc_depth']]
             inputs += [json['sync_retry_delay']]
             inputs += [json['sync_retry_nodes']]

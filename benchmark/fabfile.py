@@ -13,8 +13,8 @@ from benchmark.remote import Bench, BenchError
 def local(ctx, debug=True):
     ''' Run benchmarks on localhost '''
     bench_params = {
-        'faults': 0,
-        'nodes': 4,
+        'faults': 2,
+        'nodes': 8,
         'workers': 1,
         'rate': 50_000,
         'tx_size': 512,
@@ -27,7 +27,8 @@ def local(ctx, debug=True):
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
         'batch_size': 500_000,  # bytes
-        'max_batch_delay': 200  # ms
+        'max_batch_delay': 200,  # ms
+        'freeze_check_interval': 15,
     }
     try:
         ret = LocalBench(bench_params, node_params).run(debug)
@@ -110,7 +111,8 @@ def remote(ctx, debug=False):
         'sync_retry_delay': 10_000,  # ms
         'sync_retry_nodes': 3,  # number of nodes
         'batch_size': 500_000,  # bytes
-        'max_batch_delay': 200  # ms
+        'max_batch_delay': 200,  # ms
+        'freeze_check_interval': 15,
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug)

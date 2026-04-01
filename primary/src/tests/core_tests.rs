@@ -294,7 +294,7 @@ async fn process_certificates() {
     let (_tx_certificates_loopback, rx_certificates_loopback) = channel(1);
     let (_tx_headers, rx_headers) = channel(1);
     let (tx_consensus, mut rx_consensus) = channel(3);
-    let (tx_parents, mut rx_parents) = channel(1);
+    let (tx_parents, mut rx_parents) = channel(3);
 
     // Create a new test store.
     let path = ".db_test_process_certificates";
@@ -342,9 +342,18 @@ async fn process_certificates() {
     }
 
     // Ensure the core sends the parents of the certificates to the proposer.
-    let received = rx_parents.recv().await.unwrap();
-    let parents = certificates.iter().map(|x| x.digest()).collect();
-    assert_eq!(received, (parents, 1));
+    // New logic forwards certificates to proposer one-by-one (per path), not as a quorum batch.
+    let mut received_digests = std::collections::BTreeSet::new();
+    for _ in 0..certificates.len() {
+        let (parents_certs, round) = rx_parents.recv().await.unwrap();
+        assert_eq!(round, 1);
+        for cert in parents_certs {
+            received_digests.insert(cert.digest());
+        }
+    }
+    let parent_digests: std::collections::BTreeSet<_> =
+        certificates.iter().map(|x| x.digest()).collect();
+    assert_eq!(received_digests, parent_digests);
 
     // Ensure the core sends the certificates to the consensus.
     for x in certificates.clone() {

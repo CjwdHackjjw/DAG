@@ -1,5 +1,5 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
-use crate::aggregators::{CertificatesAggregator, VotesAggregator};
+use crate::aggregators::VotesAggregator;
 use crate::error::{DagError, DagResult};
 use crate::messages::{Certificate, Header, Vote};
 use crate::primary::{PrimaryMessage, Round};
@@ -47,8 +47,8 @@ pub struct Core {
     rx_proposer: Receiver<Header>,
     /// Output all certificates to the consensus layer.
     tx_consensus: Sender<Certificate>,
-    /// Send valid a quorum of certificates' ids to the `Proposer` (along with their round).
-    tx_proposer: Sender<(Vec<Digest>, Round)>,
+    /// Send valid certificates to the `Proposer` (along with their round).
+    tx_proposer: Sender<(Vec<Certificate>, Round)>,
 
     /// The last garbage collected round.
     gc_round: Round,
@@ -56,12 +56,18 @@ pub struct Core {
     last_voted: HashMap<Round, HashSet<PublicKey>>,
     /// The set of headers we are currently processing.
     processing: HashMap<Round, HashSet<Digest>>,
+    /// 记录每轮收到过哪些作者的 header（用于判断“是否收到 i+1 轮提案”）
+    seen_headers: HashMap<Round, HashSet<PublicKey>>,
+    /// 等待冻结结果的路径：target_path -> stall_round
+    pending_freezes: HashMap<PublicKey, Round>,
+    /// 因等待冻结结果而暂缓投票的 header
+    deferred_headers: HashMap<PublicKey, Vec<Header>>,
     /// The last header we proposed (for which we are waiting votes).
     current_header: Header,
     /// Aggregates votes into a certificate.
     votes_aggregator: VotesAggregator,
-    /// Aggregates certificates to use as parents for new headers.
-    certificates_aggregators: HashMap<Round, Box<CertificatesAggregator>>,
+    /// 已冻结的路径集合：路径公钥 -> 冻结轮次（该轮次及之后的 header 不再被接受）
+    frozen_paths: HashMap<PublicKey, Round>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
     /// Keeps the cancel handlers of the messages we sent.
@@ -83,7 +89,7 @@ impl Core {
         rx_certificate_waiter: Receiver<Certificate>,
         rx_proposer: Receiver<Header>,
         tx_consensus: Sender<Certificate>,
-        tx_proposer: Sender<(Vec<Digest>, Round)>,
+        tx_proposer: Sender<(Vec<Certificate>, Round)>,
     ) {
         tokio::spawn(async move {
             Self {
@@ -103,9 +109,12 @@ impl Core {
                 gc_round: 0,
                 last_voted: HashMap::with_capacity(2 * gc_depth as usize),
                 processing: HashMap::with_capacity(2 * gc_depth as usize),
+                seen_headers: HashMap::with_capacity(2 * gc_depth as usize),
+                pending_freezes: HashMap::new(),
+                deferred_headers: HashMap::new(),
                 current_header: Header::default(),
                 votes_aggregator: VotesAggregator::new(),
-                certificates_aggregators: HashMap::with_capacity(2 * gc_depth as usize),
+                frozen_paths: HashMap::new(),
                 network: ReliableSender::new(),
                 cancel_handlers: HashMap::with_capacity(2 * gc_depth as usize),
             }
@@ -141,6 +150,13 @@ impl Core {
     #[async_recursion]
     async fn process_header(&mut self, header: &Header) -> DagResult<()> {
         debug!("Processing {:?}", header);
+
+        // 记录：该轮次已收到该作者的 header（用于判断 i+1 轮提案是否收到）
+        self.seen_headers
+            .entry(header.round)
+            .or_insert_with(HashSet::new)
+            .insert(header.author);
+
         // Indicate that we are processing this header.
         self.processing
             .entry(header.round)
@@ -156,19 +172,9 @@ impl Core {
             return Ok(());
         }
 
-        // Check the parent certificates. Ensure the parents form a quorum and are all from the previous round.
-        let mut stake = 0;
-        for x in parents {
-            ensure!(
-                x.round() + 1 == header.round,
-                DagError::MalformedHeader(header.id.clone())
-            );
-            stake += self.committee.stake(&x.origin());
-        }
-        ensure!(
-            stake >= self.committee.quorum_threshold(),
-            DagError::HeaderRequiresQuorum(header.id.clone())
-        );
+        // 新方案：每个路径独立提案，parents 可以来自不同轮次的不同路径。
+        // 只需验证 parents 确实存在（synchronizer 已保证），不限制轮次大小。
+        let _ = parents;
 
         // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
         // reschedule processing of this header once we have it.
@@ -181,6 +187,19 @@ impl Core {
         let bytes = bincode::serialize(header).expect("Failed to serialize header");
         self.store.write(header.id.to_vec(), bytes).await;
 
+        // 若该作者路径正在等待冻结结果，则先暂缓投票（等结果出来再决定是否补投）
+        if self.pending_freezes.contains_key(&header.author) {
+            self.deferred_headers
+                .entry(header.author)
+                .or_insert_with(Vec::new)
+                .push(header.clone());
+            debug!(
+                "Deferred voting for header {} on path {} due to pending freeze result",
+                header.id, header.author
+            );
+            return Ok(());
+        }
+
         // Check if we can vote for this header.
         if self
             .last_voted
@@ -188,8 +207,24 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(header.author)
         {
+            // Determine freeze_support: 判断是否支持冻结提案
+            // 规则：看自己有没有收到目标路径在 i+1 轮的提案
+            let freeze_support = if let Some(fp) = &header.freeze_proposal {
+                let target_round = fp.stall_round + 1;
+                let seen_target_header = self.seen_headers
+                    .get(&target_round)
+                    .map(|authors| authors.contains(&fp.target_path))
+                    .unwrap_or(false);
+
+                // 进入“等待冻结结果”状态（对目标路径后续 header 暂缓投票）
+                self.pending_freezes.insert(fp.target_path, fp.stall_round);
+                !seen_target_header
+            } else {
+                false
+            };
+
             // Make a vote and send it to the header's creator.
-            let vote = Vote::new(header, &self.name, &mut self.signature_service).await;
+            let vote = Vote::new_with_freeze(header, &self.name, freeze_support, &mut self.signature_service).await;
             debug!("Created {:?}", vote);
             if vote.origin == self.name {
                 self.process_vote(vote)
@@ -278,18 +313,78 @@ impl Core {
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
 
-        // Check if we have enough certificates to enter a new dag round and propose a header.
-        if let Some(parents) = self
-            .certificates_aggregators
-            .entry(certificate.round())
-            .or_insert_with(|| Box::new(CertificatesAggregator::new()))
-            .append(certificate.clone(), &self.committee)?
-        {
-            // Send it to the `Proposer`.
-            self.tx_proposer
-                .send((parents, certificate.round()))
-                .await
-                .expect("Failed to send certificate");
+        // 新方案：每收到一个有效 certificate 就立刻通知 Proposer 更新该路径的最新证书。
+        // 不再等待 2f+1 quorum，各路径独立推进。
+        self.tx_proposer
+            .send((vec![certificate.clone()], certificate.round()))
+            .await
+            .expect("Failed to send certificate to proposer");
+
+        // 更新冻结路径记录：如果证书包含冻结结果，记录冻结轮次
+        for frozen_path in &certificate.frozen_paths {
+            let freeze_round = certificate.header.freeze_proposal
+                .as_ref()
+                .map(|fp| fp.stall_round + 1)
+                .unwrap_or(certificate.round());
+            self.frozen_paths
+                .entry(*frozen_path)
+                .or_insert(freeze_round);
+            debug!("Path {:?} is now frozen from round {}", frozen_path, freeze_round);
+        }
+
+        // 冻结结果决议完成：
+        // - 冻结通过：继续不支持该路径（deferred 丢弃）
+        // - 冻结未通过：补投之前暂缓的 header
+        if let Some(fp) = &certificate.header.freeze_proposal {
+            let target = fp.target_path;
+            let frozen = certificate.frozen_paths.contains(&target);
+
+            // 清除 pending freeze 状态
+            self.pending_freezes.remove(&target);
+
+            if frozen {
+                // 冻结通过：丢弃暂缓队列
+                self.deferred_headers.remove(&target);
+                debug!("Freeze passed for path {:?}, deferred headers dropped", target);
+            } else {
+                // 冻结没通过：补投暂缓的 header
+                if let Some(mut deferred) = self.deferred_headers.remove(&target) {
+                    // 按轮次顺序补投
+                    deferred.sort_by_key(|h| h.round);
+                    for h in deferred {
+                        debug!("Freeze rejected, resume voting for deferred header {}", h.id);
+                        // 只在未冻结且未投过该轮该作者时才补投
+                        if self.frozen_paths.get(&h.author).map(|r| h.round >= *r).unwrap_or(false) {
+                            continue;
+                        }
+                        if !self
+                            .last_voted
+                            .entry(h.round)
+                            .or_insert_with(HashSet::new)
+                            .insert(h.author)
+                        {
+                            continue;
+                        }
+                        let vote = Vote::new_with_freeze(&h, &self.name, false, &mut self.signature_service).await;
+                        if vote.origin == self.name {
+                            self.process_vote(vote).await?;
+                        } else {
+                            let address = self
+                                .committee
+                                .primary(&h.author)
+                                .expect("Author of valid header is not in the committee")
+                                .primary_to_primary;
+                            let bytes = bincode::serialize(&PrimaryMessage::Vote(vote))
+                                .expect("Failed to serialize resumed vote");
+                            let handler = self.network.send(address, Bytes::from(bytes)).await;
+                            self.cancel_handlers
+                                .entry(h.round)
+                                .or_insert_with(Vec::new)
+                                .push(handler);
+                        }
+                    }
+                }
+            }
         }
 
         // Send it to the consensus layer.
@@ -308,6 +403,14 @@ impl Core {
             self.gc_round <= header.round,
             DagError::TooOld(header.id.clone(), header.round)
         );
+
+        // 拒绝已冻结路径上的 header（冻结轮次及之后的 header 不再被接受）
+        if let Some(&freeze_round) = self.frozen_paths.get(&header.author) {
+            ensure!(
+                header.round < freeze_round,
+                DagError::TooOld(header.id.clone(), header.round)
+            );
+        }
 
         // Verify the header's signature.
         header.verify(&self.committee)?;
@@ -403,7 +506,7 @@ impl Core {
                 let gc_round = round - self.gc_depth;
                 self.last_voted.retain(|k, _| k >= &gc_round);
                 self.processing.retain(|k, _| k >= &gc_round);
-                self.certificates_aggregators.retain(|k, _| k >= &gc_round);
+                self.seen_headers.retain(|k, _| k >= &gc_round);
                 self.cancel_handlers.retain(|k, _| k >= &gc_round);
                 self.gc_round = gc_round;
             }

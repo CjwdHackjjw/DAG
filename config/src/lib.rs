@@ -10,6 +10,10 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use thiserror::Error;
 
+fn default_freeze_check_interval() -> u64 {
+    15
+}
+
 #[derive(Error, Debug)]
 pub enum ConfigError {
     #[error("Node {0} is not in the committee")]
@@ -66,6 +70,9 @@ pub struct Parameters {
     /// The maximum delay that the primary waits between generating two headers, even if the header
     /// did not reach `max_header_size`. Denominated in ms.
     pub max_header_delay: u64,
+    /// Freeze check interval (m): observer checks stalled paths every `m` rounds.
+    #[serde(default = "default_freeze_check_interval")]
+    pub freeze_check_interval: u64,
     /// The depth of the garbage collection (Denominated in number of rounds).
     pub gc_depth: u64,
     /// The delay after which the synchronizer retries to send sync requests. Denominated in ms.
@@ -86,6 +93,7 @@ impl Default for Parameters {
         Self {
             header_size: 1_000,
             max_header_delay: 100,
+            freeze_check_interval: default_freeze_check_interval(),
             gc_depth: 50,
             sync_retry_delay: 5_000,
             sync_retry_nodes: 3,
@@ -101,6 +109,10 @@ impl Parameters {
     pub fn log(&self) {
         info!("Header size set to {} B", self.header_size);
         info!("Max header delay set to {} ms", self.max_header_delay);
+        info!(
+            "Freeze check interval set to {} rounds",
+            self.freeze_check_interval
+        );
         info!("Garbage collection depth set to {} rounds", self.gc_depth);
         info!("Sync retry delay set to {} ms", self.sync_retry_delay);
         info!("Sync retry nodes set to {} nodes", self.sync_retry_nodes);

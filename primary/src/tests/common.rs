@@ -98,6 +98,7 @@ pub fn header() -> Header {
     let header = Header {
         author,
         round: 1,
+        path_id: author,
         parents: Certificate::genesis(&committee())
             .iter()
             .map(|x| x.digest())
@@ -119,6 +120,7 @@ pub fn headers() -> Vec<Header> {
             let header = Header {
                 author,
                 round: 1,
+                path_id: author,
                 parents: Certificate::genesis(&committee())
                     .iter()
                     .map(|x| x.digest())
@@ -145,6 +147,8 @@ pub fn votes(header: &Header) -> Vec<Vote> {
                 origin: header.author,
                 author,
                 signature: Signature::default(),
+                timestamp: 0,
+                freeze_support: false,
             };
             Vote {
                 signature: Signature::new(&vote.digest(), &secret),
@@ -162,6 +166,9 @@ pub fn certificate(header: &Header) -> Certificate {
             .into_iter()
             .map(|x| (x.author, x.signature))
             .collect(),
+        timestamp: 0,
+        freeze_votes: std::collections::HashMap::new(),
+        frozen_paths: std::collections::HashSet::new(),
     }
 }
 

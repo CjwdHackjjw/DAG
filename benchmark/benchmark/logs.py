@@ -113,6 +113,9 @@ class LogParser:
             'max_header_delay': int(
                 search(r'Max header delay .* (\d+)', log).group(1)
             ),
+            'freeze_check_interval': int(
+                search(r'Freeze check interval .* (\d+)', log).group(1)
+            ),
             'gc_depth': int(
                 search(r'Garbage collection depth .* (\d+)', log).group(1)
             ),
@@ -190,6 +193,7 @@ class LogParser:
     def result(self):
         header_size = self.configs[0]['header_size']
         max_header_delay = self.configs[0]['max_header_delay']
+        freeze_check_interval = self.configs[0]['freeze_check_interval']
         gc_depth = self.configs[0]['gc_depth']
         sync_retry_delay = self.configs[0]['sync_retry_delay']
         sync_retry_nodes = self.configs[0]['sync_retry_nodes']
@@ -217,6 +221,7 @@ class LogParser:
             '\n'
             f' Header size: {header_size:,} B\n'
             f' Max header delay: {max_header_delay:,} ms\n'
+            f' Freeze check interval: {freeze_check_interval:,} round(s)\n'
             f' GC depth: {gc_depth:,} round(s)\n'
             f' Sync retry delay: {sync_retry_delay:,} ms\n'
             f' Sync retry nodes: {sync_retry_nodes:,} node(s)\n'
