@@ -45,8 +45,6 @@ pub struct Proposer {
     round: Round,
     /// The latest round we have proposed on our own path.
     last_proposed_round: Round,
-    /// Timestamp of the last proposal attempt (used for same-round cooldown).
-    last_proposed_at: Option<Instant>,
     /// Stores the latest certificate for each node's path
     latest_certificates: HashMap<PublicKey, Option<Certificate>>,
     /// Holds the batches' digests waiting to be included in the next header.
@@ -96,7 +94,6 @@ impl Proposer {
                 tx_core,
                 round: 1,
                 last_proposed_round: 0,
-                last_proposed_at: None,
                 latest_certificates,
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
@@ -150,9 +147,8 @@ impl Proposer {
             .await
             .expect("Failed to send header");
 
-        // 记录自己路径最新已提案轮次和提案时间
+        // 记录自己路径最新已提案轮次
         self.last_proposed_round = self.round;
-        self.last_proposed_at = Some(Instant::now());
     }
 
     /// 生成冻结提案（如果需要）
@@ -250,20 +246,7 @@ impl Proposer {
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            // 同一轮次内允许重复提案，但需要满足 3 * max_header_delay 的冷却时间。
-            let same_round_cooldown_elapsed = if self.last_proposed_round == self.round {
-                self.last_proposed_at
-                    .map(|t| t.elapsed() >= Duration::from_millis(self.max_header_delay * 3))
-                    .unwrap_or(true)
-            } else {
-                true
-            };
-
-            if own_prev_cert_ready
-                && own_prev_proposed_ready
-                && (enough_digests || timer_expired)
-                && same_round_cooldown_elapsed
-            {
+            if own_prev_cert_ready && own_prev_proposed_ready && (enough_digests || timer_expired) {
                 // Make a new header.
                 self.make_header().await;
                 self.payload_size = 0;
