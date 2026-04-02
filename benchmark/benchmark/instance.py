@@ -107,20 +107,32 @@ class InstanceManager:
             ],
         )
 
+    # def _get_ami(self, client):
+    #     # The AMI changes with regions.
+    #     response = client.describe_images(
+    #         Filters=[
+    #             {
+    #                 "Name": "description",
+    #                 "Values": [
+    #                     "Canonical, Ubuntu, 22.04 LTS, amd64 jammy image build on 2023-09-19"
+    #                 ],
+    #             }
+    #         ]
+    #     )
+    #     return response["Images"][0]["ImageId"]
     def _get_ami(self, client):
-        # The AMI changes with regions.
+        # Canonical publisher account
         response = client.describe_images(
+            Owners=["099720109477"],
             Filters=[
-                {
-                    "Name": "description",
-                    "Values": [
-                        "Canonical, Ubuntu, 22.04 LTS, amd64 jammy image build on 2023-09-19"
-                    ],
-                }
-            ]
+                {"Name": "name", "Values": ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]},
+                {"Name": "state", "Values": ["available"]},
+            ],
         )
-        return response["Images"][0]["ImageId"]
-
+        images = sorted(response.get("Images", []), key=lambda x: x["CreationDate"], reverse=True)
+        if not images:
+            raise RuntimeError("No Ubuntu 22.04 AMI found in this region")
+        return images[0]["ImageId"]
     def create_instances(self, instances):
         assert isinstance(instances, int) and instances > 0
 
