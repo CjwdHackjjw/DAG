@@ -95,24 +95,24 @@ def install(ctx):
 def remote(ctx, debug=False):
     ''' Run benchmarks on AWS '''
     bench_params = {
-        'faults': 0,
-        'nodes': [2],
+        'faults': 3,
+        'nodes': [10],
         'workers': 1,
         'collocate': True,
-        'rate': [1000],
+        'rate': [10_000, 30_000, 50_000, 70_000, 10_0000],
         'tx_size': 512,
         'duration': 300,
         'runs': 1,
     }
     node_params = {
-        'header_size': 1_000,  # bytes
-        'max_header_delay': 50_00,  # ms
+        'header_size': 50,  # bytes
+        'max_header_delay': 5_000,  # ms
         'gc_depth': 50,  # rounds
         'sync_retry_delay': 10_000,  # ms
-        'sync_retry_nodes': 2,  # number of nodes
+        'sync_retry_nodes': 3,  # number of nodes
         'batch_size': 500_000,  # bytes
         'max_batch_delay': 200,  # ms
-        'freeze_check_interval': 15,
+        'freeze_check_interval': 25,
     }
     try:
         Bench(ctx).run(bench_params, node_params, debug)

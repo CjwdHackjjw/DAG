@@ -246,7 +246,17 @@ impl Proposer {
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            if own_prev_cert_ready && own_prev_proposed_ready && (enough_digests || timer_expired) {
+            // 同一轮第一次提案可以由 payload 满或 timer 触发；
+            // 若这一轮已经提案过，则只允许 timer 到期后重提，
+            // 避免迟到投票还在返回时又被新 payload 立即触发替换当前提案。
+            let round_already_proposed = self.last_proposed_round == self.round;
+            let proposal_trigger = if round_already_proposed {
+                timer_expired
+            } else {
+                enough_digests || timer_expired
+            };
+
+            if own_prev_cert_ready && own_prev_proposed_ready && proposal_trigger {
                 // Make a new header.
                 self.make_header().await;
                 self.payload_size = 0;
