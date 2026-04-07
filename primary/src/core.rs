@@ -227,9 +227,14 @@ impl Core {
             let vote = Vote::new_with_freeze(header, &self.name, freeze_support, &mut self.signature_service).await;
             debug!("Created {:?}", vote);
             if vote.origin == self.name {
-                self.process_vote(vote)
-                    .await
-                    .expect("Failed to process our own vote");
+                if let Err(err) = self.process_vote(vote).await {
+                    match err {
+                        DagError::AuthorityReuse(author) => {
+                            debug!("Ignoring duplicate own vote from {}", author);
+                        }
+                        _ => panic!("Failed to process our own vote: {}", err),
+                    }
+                }
             } else {
                 let address = self
                     .committee
