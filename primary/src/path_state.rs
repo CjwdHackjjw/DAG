@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 /// 路径状态：用于管理每条提案路径的状态
 #[derive(Clone, Debug)]
-pub struct PathState {
+pub struct ProposalPathState {
     /// 路径标识（节点公钥）
     pub path_id: PublicKey,
     
@@ -23,7 +23,7 @@ pub struct PathState {
     pub executable_headers: HashSet<Digest>,
 }
 
-impl PathState {
+impl ProposalPathState {
     /// 创建新的路径状态
     pub fn new(path_id: PublicKey) -> Self {
         Self {

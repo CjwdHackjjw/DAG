@@ -12,10 +12,10 @@ use tokio::sync::mpsc::{Receiver, Sender};
 #[path = "tests/consensus_tests.rs"]
 pub mod consensus_tests;
 
-/// DAG 在内存中的表示：
-/// 外层 key 是轮次（Round），内层 key 是提案路径标识（节点公钥），
-/// value 是 (证书摘要, 证书) 的元组。
-type Dag = HashMap<Round, HashMap<PublicKey, (Digest, Certificate)>>;
+/// DAG 索引（按轮次 + 路径）
+type RoundPathIndex = HashMap<Round, HashMap<PublicKey, Certificate>>;
+/// DAG 索引（按证书摘要）
+type DigestIndex = HashMap<Digest, Certificate>;
 
 /// 可执行 Header 的包装结构，用于放入时间戳最小堆。
 /// 当一个 header 对应的 certificate 到来后，其同路径的前驱 header
@@ -54,7 +54,7 @@ impl Eq for ExecutableHeader {}
 
 /// 每条提案路径的共识状态。
 /// 每个节点负责一条路径，共识层为每条路径独立维护此状态。
-struct PathState {
+struct ConsensusPathState {
     /// 路径标识（对应节点的公钥）
     path_id: PublicKey,
     /// 该路径是否已被冻结（节点宕机后经过观察节点冻结提案通过）
@@ -70,7 +70,7 @@ struct PathState {
     highest_executable_digest: Option<Digest>,
 }
 
-impl PathState {
+impl ConsensusPathState {
     fn new(path_id: PublicKey) -> Self {
         Self {
             path_id,
@@ -113,10 +113,12 @@ struct State {
     last_committed_round: Round,
     /// 各路径已提交的最高轮次
     last_committed: HashMap<PublicKey, Round>,
-    /// 内存中的 DAG：存储所有已收到的证书，按轮次和路径索引
-    dag: Dag,
+    /// DAG 索引：按轮次+路径查询证书
+    round_path_index: RoundPathIndex,
+    /// DAG 索引：按摘要查询证书
+    digest_index: DigestIndex,
     /// 各路径的独立状态
-    path_states: HashMap<PublicKey, PathState>,
+    path_states: HashMap<PublicKey, ConsensusPathState>,
     /// 可执行 header 的时间戳排序队列（最小堆，堆顶为时间戳最早的）
     executable_queue: BinaryHeap<ExecutableHeader>,
     /// 已提交（已执行）的 header 摘要集合，防止重复提交
@@ -129,18 +131,25 @@ impl State {
     fn new(genesis: Vec<Certificate>) -> Self {
         let genesis_map = genesis
             .into_iter()
-            .map(|x| (x.origin(), (x.digest(), x)))
+            .map(|x| (x.origin(), x))
             .collect::<HashMap<_, _>>();
-        // 为每条路径初始化 PathState
+        // 为每条路径初始化 ConsensusPathState
         let mut path_states = HashMap::new();
-        for (name, _) in &genesis_map {
-            path_states.insert(*name, PathState::new(*name));
+        for name in genesis_map.keys() {
+            path_states.insert(*name, ConsensusPathState::new(*name));
         }
+
+        let mut digest_index = HashMap::new();
+        for cert in genesis_map.values() {
+            digest_index.insert(cert.digest(), cert.clone());
+        }
+
         Self {
             last_committed_round: 0,
-            last_committed: genesis_map.iter().map(|(x, (_, y))| (*x, y.round())).collect(),
-            // DAG 第 0 轮存放所有创世证书
-            dag: [(0, genesis_map)].iter().cloned().collect(),
+            last_committed: genesis_map.iter().map(|(x, y)| (*x, y.round())).collect(),
+            // 第 0 轮存放所有创世证书
+            round_path_index: [(0, genesis_map)].iter().cloned().collect(),
+            digest_index,
             path_states,
             executable_queue: BinaryHeap::new(),
             executed: HashSet::new(),
@@ -155,18 +164,11 @@ impl State {
     /// - 只处理同路径（path_id 相同）的前驱，不同路径的引用仅用于网络同步
     /// - 递归终止条件：遇到已经是可执行的 header（避免重复处理）
     fn update_executable(&mut self, cert: &Certificate, queue: &mut BinaryHeap<ExecutableHeader>) {
-        let cur_round = cert.round();
         let cur_path = cert.header.path_id;
 
         for parent_digest in &cert.header.parents {
-            // 同路径的前驱 parent 一定在 cur_round-1 轮次：
-            // 每个节点只在自己路径上提案，且必须等自己路径上一轮证书到来才能提案，
-            // 因此同路径 parent 轮次严格等于 cur_round-1。
-            // 不同路径的 parent 可能来自任意轮次，但不触发可执行性更新（只用于网络同步）。
-            let parent_cert = self.dag
-                .get(&(cur_round.saturating_sub(1)))
-                .and_then(|m| m.values().find(|(d, _)| d == parent_digest))
-                .map(|(_, c)| c.clone());
+            // 通过 digest 索引 O(1) 查找 parent certificate。
+            let parent_cert = self.digest_index.get(parent_digest).cloned();
 
             if let Some(pc) = parent_cert {
                 // 只处理同路径的前驱
@@ -174,7 +176,7 @@ impl State {
                     let hdr_digest = pc.header.id.clone();
                     let ps = self.path_states
                         .entry(cur_path)
-                        .or_insert_with(|| PathState::new(cur_path));
+                        .or_insert_with(|| ConsensusPathState::new(cur_path));
                     if !ps.is_executable(&hdr_digest) {
                         ps.mark_executable(&pc);
                         queue.push(ExecutableHeader {
@@ -205,14 +207,14 @@ impl State {
             // 步骤1：确保 stall_round-1 的 header 已变为可执行
             // （若节点在 i 轮停滞，则 i-1 轮的 header 是其最后一个有效 header）
             if fp.stall_round > 0 {
-                let prev = self.dag
+                let prev = self.round_path_index
                     .get(&(fp.stall_round.saturating_sub(1)))
                     .and_then(|m| m.get(frozen_path))
-                    .map(|(_, c)| c.clone());
+                    .cloned();
                 if let Some(prev_cert) = prev {
                     let ps = self.path_states
                         .entry(*frozen_path)
-                        .or_insert_with(|| PathState::new(*frozen_path));
+                        .or_insert_with(|| ConsensusPathState::new(*frozen_path));
                     if !ps.is_executable(&prev_cert.header.id) {
                         ps.mark_executable(&prev_cert);
                         queue.push(ExecutableHeader {
@@ -229,7 +231,7 @@ impl State {
             // 此后该路径在 freeze_round 及之后的 header 不再参与共识
             let ps = self.path_states
                 .entry(*frozen_path)
-                .or_insert_with(|| PathState::new(*frozen_path));
+                .or_insert_with(|| ConsensusPathState::new(*frozen_path));
             ps.freeze(fp.stall_round + 1);
             debug!("Path {:?} frozen at round {}", frozen_path, fp.stall_round + 1);
         }
@@ -407,10 +409,11 @@ impl Consensus {
             // 步骤1：将新证书加入 DAG
             // 按轮次和路径索引存储，供 update_executable 递归查找使用
             state
-                .dag
+                .round_path_index
                 .entry(round)
                 .or_insert_with(HashMap::new)
-                .insert(origin, (certificate.digest(), certificate.clone()));
+                .insert(origin, certificate.clone());
+            state.digest_index.insert(certificate.digest(), certificate.clone());
 
             // 步骤2：处理冻结结果
             // 若该证书包含冻结提案且超过 2f+1 节点支持，则冻结对应路径

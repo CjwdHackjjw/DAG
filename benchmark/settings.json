@@ -1,7 +1,9 @@
 {
+    "provider": "aliyun",
+    "ssh_user": "ubuntu",
     "key": {
-        "name": "aws",
-        "path": "/home/jjw/.ssh/aws"
+        "name": "your-keypair-name",
+        "path": "/home/你/.ssh/your-key.pem"
     },
     "port": 5000,
     "repo": {
@@ -10,13 +12,22 @@
         "branch": "main"
     },
     "instances": {
-        "type": "m7i-flex.large",
+        "name": "dag-node",
+        "type": "ecs.c7.large",
         "regions": [
-            "ap-south-1",
-            "ap-northeast-3",
-            "ap-northeast-2",
-            "ap-southeast-2",
-            "ap-northeast-1"
+            "cn-hangzhou"
         ]
+    },
+    "aliyun": {
+        "access_key_id": "你的AK",
+        "access_key_secret": "你的SK",
+        "key_pair_name": "your-keypair-name",
+        "region_config": {
+            "cn-hangzhou": {
+                "security_group_id": "sg-xxx",
+                "vswitch_id": "vsw-xxx",
+                "image_id": "ubuntu_22_04_x64_20G_alibase_20240218.vhd"
+            }
+        }
     }
 }

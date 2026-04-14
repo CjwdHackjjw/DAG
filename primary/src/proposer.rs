@@ -1,6 +1,6 @@
 // Copyright(C) Facebook, Inc. and its affiliates.
 use crate::messages::{Certificate, FreezeProposal, Header};
-use crate::path_state::PathState;
+use crate::path_state::ProposalPathState;
 use crate::primary::Round;
 use config::{Committee, WorkerId};
 use crypto::Hash as _;
@@ -45,14 +45,12 @@ pub struct Proposer {
     round: Round,
     /// The latest round we have proposed on our own path.
     last_proposed_round: Round,
-    /// Stores the latest certificate for each node's path
-    latest_certificates: HashMap<PublicKey, Option<Certificate>>,
+    /// Holds path states for tracking latest certificates and frozen paths
+    path_states: HashMap<PublicKey, ProposalPathState>,
     /// Holds the batches' digests waiting to be included in the next header.
     digests: Vec<(Digest, WorkerId)>,
     /// Keeps track of the size (in bytes) of batches' digests that we received so far.
     payload_size: usize,
-    /// Path states for tracking stalled paths
-    path_states: HashMap<PublicKey, PathState>,
 }
 
 impl Proposer {
@@ -71,14 +69,14 @@ impl Proposer {
 
         let committee = committee.clone();
         let genesis = Certificate::genesis(&committee);
-        let mut latest_certificates = HashMap::new();
         let mut path_states = HashMap::new();
 
-        // Initialize latest_certificates and path_states with genesis certificates
-        for cert in &genesis {
+        // Initialize path_states with genesis certificates.
+        for cert in genesis {
             let path_id = cert.header.path_id;
-            latest_certificates.insert(path_id, Some(cert.clone()));
-            path_states.insert(path_id, PathState::new(path_id));
+            let mut state = ProposalPathState::new(path_id);
+            state.update_latest_certificate(cert);
+            path_states.insert(path_id, state);
         }
 
         tokio::spawn(async move {
@@ -94,10 +92,9 @@ impl Proposer {
                 tx_core,
                 round: 1,
                 last_proposed_round: 0,
-                latest_certificates,
+                path_states,
                 digests: Vec::with_capacity(2 * header_size),
                 payload_size: 0,
-                path_states,
             }
             .run()
             .await;
@@ -108,15 +105,12 @@ impl Proposer {
         // 构建 parents：引用所有节点对应路径最新的证书
         // 已冻结的路径直接跳过，不再引用
         let mut parents = std::collections::BTreeSet::new();
-        for (path_id, cert_opt) in &self.latest_certificates {
-            if let Some(cert) = cert_opt {
-                let is_frozen = self.path_states
-                    .get(path_id)
-                    .map(|ps| ps.is_frozen)
-                    .unwrap_or(false);
-                if !is_frozen {
-                    parents.insert(cert.digest());
-                }
+        for state in self.path_states.values() {
+            if state.is_frozen {
+                continue;
+            }
+            if let Some(cert) = &state.latest_certificate {
+                parents.insert(cert.digest());
             }
         }
 
@@ -234,9 +228,9 @@ impl Proposer {
             // 提案条件：
             // 1. 自己路径上一轮已经有了证书（自身路径的上一轮 certificate 已存在）
             // 2. payload 足够 或 timer 超时
-            let own_prev_cert_ready = self.latest_certificates
+            let own_prev_cert_ready = self.path_states
                 .get(&self.name)
-                .and_then(|c| c.as_ref())
+                .and_then(|ps| ps.latest_certificate.as_ref())
                 .map(|c| c.round() == self.round - 1)
                 .unwrap_or(self.round == 1); // round 1 时创世证书已就绪
 
@@ -281,7 +275,7 @@ impl Proposer {
                                 .unwrap_or(cert_round);
                             let ps = self.path_states
                                 .entry(*frozen_path)
-                                .or_insert_with(|| PathState::new(*frozen_path));
+                                .or_insert_with(|| ProposalPathState::new(*frozen_path));
                             if !ps.is_frozen {
                                 ps.freeze(freeze_round);
                                 debug!("Proposer: path {:?} frozen at round {}", frozen_path, freeze_round);
@@ -291,10 +285,9 @@ impl Proposer {
                         // 更新路径状态
                         let ps = self.path_states
                             .entry(path_id)
-                            .or_insert_with(|| PathState::new(path_id));
+                            .or_insert_with(|| ProposalPathState::new(path_id));
 
                         ps.update_latest_certificate(cert.clone());
-                        self.latest_certificates.insert(path_id, Some(cert.clone()));
 
                         // 如果是自己路径的证书，推进本地轮次
                         if path_id == self.name {

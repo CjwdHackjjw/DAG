@@ -19,5 +19,5 @@ mod synchronizer;
 mod common;
 
 pub use crate::messages::{Certificate, FreezeProposal, Header};
-pub use crate::path_state::PathState;
+pub use crate::path_state::ProposalPathState;
 pub use crate::primary::{Primary, PrimaryWorkerMessage, Round, WorkerPrimaryMessage};
