@@ -4,27 +4,27 @@ use crate::primary::Round;
 use crypto::{Digest, PublicKey};
 use std::collections::HashSet;
 
-/// 路径状态：用于管理每条提案路径的状态
+/// Path state used to manage the status of each proposal path
 #[derive(Clone, Debug)]
 pub struct ProposalPathState {
-    /// 路径标识（节点公钥）
+    /// Path identifier (node public key)
     pub path_id: PublicKey,
     
-    /// 该路径最新的证书
+    /// Latest certificate on this path
     pub latest_certificate: Option<Certificate>,
     
-    /// 该路径是否被冻结
+    /// Whether this path is frozen
     pub is_frozen: bool,
     
-    /// 冻结发生的轮次
+    /// Round when freezing took effect
     pub freeze_round: Round,
     
-    /// 可执行的 header digest 集合
+    /// Set of executable header digests
     pub executable_headers: HashSet<Digest>,
 }
 
 impl ProposalPathState {
-    /// 创建新的路径状态
+    /// Creates a new path state
     pub fn new(path_id: PublicKey) -> Self {
         Self {
             path_id,
@@ -35,22 +35,22 @@ impl ProposalPathState {
         }
     }
 
-    /// 更新最新证书
+    /// Updates the latest certificate
     pub fn update_latest_certificate(&mut self, certificate: Certificate) {
         self.latest_certificate = Some(certificate);
     }
 
-    /// 标记 header 为可执行
+    /// Marks a header as executable
     pub fn mark_executable(&mut self, digest: Digest) {
         self.executable_headers.insert(digest);
     }
 
-    /// 检查 header 是否可执行
+    /// Checks whether a header is executable
     pub fn is_executable(&self, digest: &Digest) -> bool {
         self.executable_headers.contains(digest)
     }
 
-    /// 标记路径为冻结
+    /// Marks the path as frozen
     pub fn freeze(&mut self, freeze_round: Round) {
         self.is_frozen = true;
         self.freeze_round = freeze_round;

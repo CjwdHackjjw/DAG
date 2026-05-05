@@ -12,33 +12,33 @@ use tokio::sync::mpsc::{Receiver, Sender};
 #[path = "tests/consensus_tests.rs"]
 pub mod consensus_tests;
 
-/// DAG 索引（按轮次 + 路径）
+
 type RoundPathIndex = HashMap<Round, HashMap<PublicKey, Certificate>>;
-/// DAG 索引（按证书摘要）
+
 type DigestIndex = HashMap<Digest, Certificate>;
 
-/// 可执行 Header 的包装结构，用于放入时间戳最小堆。
-/// 当一个 header 对应的 certificate 到来后，其同路径的前驱 header
-/// 会被标记为"可执行"，并以此结构加入排序队列。
+/// Wrapper for an executable header, used in the min-heap ordered by timestamp.
+/// When the certificate corresponding to a header arrives, the same-path predecessor
+/// of that header becomes marked as executable and is inserted into the ordering queue.
 #[derive(PartialEq, Clone)]
 struct ExecutableHeader {
-    /// 该 header 对应 certificate 的时间戳中位数（毫秒）
+    /// Median timestamp of the certificate corresponding to this header, in milliseconds
     timestamp: u64,
-    /// 该 header 所在轮次
+    /// Round of this header
     round: Round,
-    /// 所属提案路径（节点公钥）
+    /// Proposal path this header belongs to, identified by node public key
     path_id: PublicKey,
-    /// header 的摘要
+    /// Digest of the header
     digest: Digest,
-    /// 完整证书，用于最终输出
+    /// Full certificate, kept for final output
     certificate: Certificate,
 }
 
 impl Ord for ExecutableHeader {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Rust 的 BinaryHeap 是最大堆，这里反转比较使时间戳最小的在堆顶，
-        // 即优先处理时间戳最早的可执行 header。
-        // 时间戳相同时，轮次更高的优先（更新的提案优先判定）。
+        // Rust's `BinaryHeap` is a max-heap, so the comparison is reversed here to place
+        // the smallest timestamp at the top of the heap.
+        // When timestamps tie, the higher round is preferred to prioritize newer proposals.
         other.timestamp.cmp(&self.timestamp)
             .then_with(|| other.round.cmp(&self.round))
     }
@@ -52,21 +52,20 @@ impl PartialOrd for ExecutableHeader {
 
 impl Eq for ExecutableHeader {}
 
-/// 每条提案路径的共识状态。
-/// 每个节点负责一条路径，共识层为每条路径独立维护此状态。
+/// Consensus state for a single proposal path.
+/// Each node owns one path, and the consensus layer maintains this state independently for every path.
 struct ConsensusPathState {
-    /// 路径标识（对应节点的公钥）
+    /// Path identifier, corresponding to the node public key
     path_id: PublicKey,
-    /// 该路径是否已被冻结（节点宕机后经过观察节点冻结提案通过）
+    /// Whether this path has been frozen after the observer's freeze proposal passed for a failed node
     is_frozen: bool,
-    /// 冻结生效的轮次（该轮次及之后的 header 不再参与共识）
+
     freeze_round: Round,
-    /// 已标记为可执行的 header 集合：digest -> (round, timestamp, certificate)
-    /// 可执行 = 该 header 的下一轮同路径证书已到来
+
     executable_headers: HashMap<Digest, (Round, u64, Certificate)>,
-    /// 当前已知最高轮次的可执行 header 的轮次
+
     highest_executable_round: Round,
-    /// 当前已知最高轮次的可执行 header 的摘要（用于共识判定）
+
     highest_executable_digest: Option<Digest>,
 }
 
@@ -82,58 +81,58 @@ impl ConsensusPathState {
         }
     }
 
-    /// 将指定证书对应的 header 标记为可执行，并更新最高轮次记录。
     fn mark_executable(&mut self, cert: &Certificate) {
         let digest = cert.header.id.clone();
         let round = cert.round();
         let timestamp = cert.timestamp;
         self.executable_headers.insert(digest.clone(), (round, timestamp, cert.clone()));
-        // 只更新最高轮次记录，旧轮次的可执行 header 仍保留在集合中
+        // Update only the highest-round record; executable headers from older rounds remain in the set.
         if round > self.highest_executable_round {
             self.highest_executable_round = round;
             self.highest_executable_digest = Some(digest);
         }
     }
 
-    /// 判断某个 header（通过摘要标识）是否已被标记为可执行。
+    /// Checks whether a header, identified by its digest, has been marked executable.
     fn is_executable(&self, digest: &Digest) -> bool {
         self.executable_headers.contains_key(digest)
     }
 
-    /// 冻结该路径：从 freeze_round 起不再参与共识判定。
+    /// Freezes this path so that it no longer participates in consensus decisions starting from `freeze_round`.
     fn freeze(&mut self, freeze_round: Round) {
         self.is_frozen = true;
         self.freeze_round = freeze_round;
     }
 }
 
-/// 共识全局状态，包含 DAG 视图、各路径状态、可执行队列和已提交记录。
+/// Global consensus state, including the DAG view, per-path state, the executable queue, and commit records.
 struct State {
-    /// 全网已提交的最高轮次（所有路径的最大值）
+    /// Highest committed round across the entire network
     last_committed_round: Round,
-    /// 各路径已提交的最高轮次
+    /// Highest committed round for each path
     last_committed: HashMap<PublicKey, Round>,
-    /// DAG 索引：按轮次+路径查询证书
+    /// DAG index by round and path
     round_path_index: RoundPathIndex,
-    /// DAG 索引：按摘要查询证书
+    /// DAG index by certificate digest
     digest_index: DigestIndex,
-    /// 各路径的独立状态
+    /// Independent state for each path
     path_states: HashMap<PublicKey, ConsensusPathState>,
-    /// 可执行 header 的时间戳排序队列（最小堆，堆顶为时间戳最早的）
+    /// Priority queue of executable headers ordered by timestamp, effectively a min-heap by earliest timestamp
     executable_queue: BinaryHeap<ExecutableHeader>,
-    /// 已提交（已执行）的 header 摘要集合，防止重复提交
+    /// Set of committed (executed) header digests, used to prevent duplicate commits
     executed: HashSet<Digest>,
 }
 
 impl State {
-    /// 用创世证书初始化共识状态。
-    /// 创世证书代表每条路径在 round=0 的起点，不参与提交，但用于 DAG 初始化。
+    /// Initializes consensus state from genesis certificates.
+    /// Genesis certificates represent the starting point of each path at round 0.
+    /// They are not committed, but are used to initialize the DAG.
     fn new(genesis: Vec<Certificate>) -> Self {
         let genesis_map = genesis
             .into_iter()
             .map(|x| (x.origin(), x))
             .collect::<HashMap<_, _>>();
-        // 为每条路径初始化 ConsensusPathState
+        // Initialize `ConsensusPathState` for every path.
         let mut path_states = HashMap::new();
         for name in genesis_map.keys() {
             path_states.insert(*name, ConsensusPathState::new(*name));
@@ -147,7 +146,7 @@ impl State {
         Self {
             last_committed_round: 0,
             last_committed: genesis_map.iter().map(|(x, y)| (*x, y.round())).collect(),
-            // 第 0 轮存放所有创世证书
+            // Store all genesis certificates in round 0.
             round_path_index: [(0, genesis_map)].iter().cloned().collect(),
             digest_index,
             path_states,
@@ -156,22 +155,23 @@ impl State {
         }
     }
 
-    /// 当新证书到来时，递归地将该证书同路径的前驱 header 标记为可执行。
+    /// When a new certificate arrives, recursively mark same-path predecessor headers as executable.
     ///
-    /// 核心逻辑：
-    /// - 一个 header 在"其同路径的下一轮证书到来"时变为可执行
-    /// - 例如：A3 的证书到来 → A2 变为可执行 → 递归检查 A2 的 parent 中同路径的 A1
-    /// - 只处理同路径（path_id 相同）的前驱，不同路径的引用仅用于网络同步
-    /// - 递归终止条件：遇到已经是可执行的 header（避免重复处理）
+    /// Core logic:
+    /// - A header becomes executable when the next-round certificate on the same path arrives
+    /// - Example: when certificate A3 arrives, A2 becomes executable, and then the algorithm recursively checks whether A1, the same-path parent of A2, should also become executable
+    /// - Only same-path predecessors, i.e. those with the same `path_id`, are processed recursively.
+    ///   References to different paths are used only for network synchronization
+    /// - Recursion stops when an already executable header is encountered, avoiding duplicate work
     fn update_executable(&mut self, cert: &Certificate, queue: &mut BinaryHeap<ExecutableHeader>) {
         let cur_path = cert.header.path_id;
 
         for parent_digest in &cert.header.parents {
-            // 通过 digest 索引 O(1) 查找 parent certificate。
+            // Use the digest index for O(1) parent-certificate lookup.
             let parent_cert = self.digest_index.get(parent_digest).cloned();
 
             if let Some(pc) = parent_cert {
-                // 只处理同路径的前驱
+                // Process only same-path predecessors.
                 if pc.header.path_id == cur_path {
                     let hdr_digest = pc.header.id.clone();
                     let ps = self.path_states
@@ -186,7 +186,7 @@ impl State {
                             digest: hdr_digest,
                             certificate: pc.clone(),
                         });
-                        // 递归：检查 parent 的同路径前驱是否也应变为可执行
+                        // Recursively check whether the same-path predecessor of this parent should also become executable.
                         self.update_executable(&pc, queue);
                     }
                 }
@@ -194,18 +194,18 @@ impl State {
         }
     }
 
-    /// 处理冻结结果：当某条路径被冻结时，确保其最后一个有效 header 被标记为可执行，
-    /// 然后正式冻结该路径。
-    /// 规则：停滞轮次为 i，冻结轮次为 i+1。
-    /// 冻结通过时必须确保 i-1 轮的 header 已标记为可执行（保证历史提案不丢失）。
+    /// Handles freeze results: when a path is frozen, ensure its last valid header is marked executable,
+    /// then freeze the path formally.
+    /// Rule: if the stall round is i, the freeze round is i+1.
+    /// When the freeze passes, the header at round i-1 must already be marked executable so that no historical proposal is lost.
     fn apply_frozen_paths(&mut self, cert: &Certificate, queue: &mut BinaryHeap<ExecutableHeader>) {
         let fp = match &cert.header.freeze_proposal {
             Some(fp) => fp.clone(),
-            None => return, // 该证书不含冻结提案，跳过
+            None => return, // Skip certificates without a freeze proposal.
         };
         for frozen_path in &cert.frozen_paths {
-            // 步骤1：确保 stall_round-1 的 header 已变为可执行
-            // （若节点在 i 轮停滞，则 i-1 轮的 header 是其最后一个有效 header）
+            // Step 1: ensure the header at stall_round - 1 has become executable.
+            // If the node stalled at round i, then the header at round i-1 is its last valid header.
             if fp.stall_round > 0 {
                 let prev = self.round_path_index
                     .get(&(fp.stall_round.saturating_sub(1)))
@@ -227,8 +227,8 @@ impl State {
                     }
                 }
             }
-            // 步骤2：正式冻结该路径，freeze_round = stall_round + 1
-            // 此后该路径在 freeze_round 及之后的 header 不再参与共识
+            // Step 2: formally freeze the path, with freeze_round = stall_round + 1.
+            // Headers on this path at freeze_round and beyond no longer participate in consensus.
             let ps = self.path_states
                 .entry(*frozen_path)
                 .or_insert_with(|| ConsensusPathState::new(*frozen_path));
@@ -237,8 +237,8 @@ impl State {
         }
     }
 
-    /// 判断一条已冻结路径上的所有可执行 header 是否都已被提交。
-    /// 若是，则该路径可以从共识判定中完全排除。
+    /// Checks whether all executable headers on a frozen path have already been committed.
+    /// If so, the path can be completely excluded from consensus decisions.
     fn is_frozen_fully_executed(&self, path_id: &PublicKey) -> bool {
         match self.path_states.get(path_id) {
             Some(ps) if ps.is_frozen =>
@@ -247,35 +247,37 @@ impl State {
         }
     }
 
-    /// 共识判定：尝试提交一批已排序的可执行 header。
+    /// Consensus decision logic: try to commit a batch of sorted executable headers.
     ///
-    /// 判定流程：
-    /// 1. 前置条件：所有参与判定的路径（未冻结完毕的路径）都必须有可执行 header，
-    ///    否则说明某条路径还未推进到足够轮次，跳过本次判定（等待更多证书到来）。
-    /// 2. 从各路径的"最高轮次可执行 header"中，选时间戳最早的作为提交目标（target）。
-    ///    时间戳相同时选轮次更高的（更新的提案）。
-    /// 3. 从排序队列中取出 target 及所有时间戳 ≤ target 的未执行 header，
-    ///    组成本次执行集合。这保证了"集合外的 header 一定比集合内的更晚提出"。
-    /// 4. 按时间戳升序提交执行集合，更新已提交记录。
+    /// Decision procedure:
+    /// 1. Precondition: every path participating in the decision (paths not fully frozen yet)
+    ///    must have at least one executable header. Otherwise, some path has not advanced
+    ///    far enough, so this round is skipped until more certificates arrive.
+    /// 2. Among the highest-round executable headers of each path, choose the one with the
+    ///    earliest timestamp as the commit target. Break ties by preferring the higher round.
+    /// 3. Pop the target and all unexecuted headers with timestamps \<= target.timestamp from
+    ///    the priority queue to form the execution set. This guarantees that headers outside
+    ///    the set were proposed later than those inside it.
+    /// 4. Commit the execution set in ascending timestamp order and update commit records.
     fn try_commit(&mut self) -> Vec<Certificate> {
-        // 步骤1：前置条件检查
-        // 遍历所有路径，确保每条参与判定的路径都有可执行 header。
-        // "参与判定"的路径 = 未冻结的路径 + 冻结但还有未执行 header 的路径。
+        // Step 1: check the preconditions.
+        // Iterate over all paths and ensure that every participating path has an executable header.
+        // A participating path is either an unfrozen path or a frozen path that still has unexecuted headers.
         for (path_id, ps) in &self.path_states {
             if ps.is_frozen && self.is_frozen_fully_executed(path_id) {
-                continue; // 已冻结且全部执行完毕，从判定中排除
+                continue; // Exclude paths that are frozen and already fully executed.
             }
             if ps.highest_executable_digest.is_none() {
-                // 该路径还没有任何可执行 header，等待其证书到来后再判定
+                // This path has no executable header yet; wait until its certificate arrives before deciding.
                 return Vec::new();
             }
         }
 
-        // 步骤2：选出提交目标（target）
-        // 遍历各路径，取每条路径"最高轮次的可执行 header"，
-        // 从中选时间戳最早的作为 target。
-        // 语义：target 是当前所有路径中"最滞后但最早提出"的 header，
-        // 它之前的所有 header 都可以安全提交（因为 target 已被多数节点见到）。
+        // Step 2: choose the commit target.
+        // Iterate over all paths, take the highest-round executable header on each path,
+        // and choose the one with the earliest timestamp as the target.
+        // Semantically, the target is the most lagging yet earliest proposed header among all paths,
+        // and all headers before it can be safely committed because the target has been seen by a quorum.
         let mut target: Option<ExecutableHeader> = None;
         for (path_id, ps) in &self.path_states {
             if ps.is_frozen && self.is_frozen_fully_executed(path_id) {
@@ -292,7 +294,7 @@ impl State {
                     };
                     let replace = match &target {
                         None => true,
-                        // 优先选时间戳更早的；时间戳相同时选轮次更高的
+                        // Prefer the earlier timestamp; break ties by preferring the higher round.
                         Some(t) => candidate.timestamp < t.timestamp
                             || (candidate.timestamp == t.timestamp && candidate.round > t.round),
                     };
@@ -306,15 +308,15 @@ impl State {
             None => return Vec::new(),
         };
 
-        // target 已经执行过则跳过（防止重复提交）
+        // Skip the target if it has already been executed, to avoid duplicate commits.
         if self.executed.contains(&target.digest) {
             return Vec::new();
         }
 
-        // 步骤3：构建执行集合
-        // 从时间戳排序队列中取出所有时间戳 ≤ target.timestamp 的未执行 header，
-        // 连同 target 本身组成执行集合。
-        // 保证：执行集合之外的 header 时间戳都比 target 更大，即更晚提出。
+        // Step 3: build the execution set.
+        // Pop all unexecuted headers with timestamps \<= target.timestamp from the priority queue,
+        // together with the target itself, to form the execution set.
+        // Guarantee: any header outside the execution set has a larger timestamp and was therefore proposed later.
         let mut execution_set: Vec<ExecutableHeader> = Vec::new();
         let mut remaining = BinaryHeap::new();
         while let Some(e) = self.executable_queue.pop() {
@@ -325,25 +327,25 @@ impl State {
                     execution_set.push(e);
                 }
             } else {
-                // 时间戳更大的留在队列中，等下次判定
+                // Keep headers with larger timestamps in the queue for the next decision round.
                 remaining.push(e);
             }
         }
         self.executable_queue = remaining;
 
-        // 确保 target 本身在执行集合中（可能 target 不在队列里而是直接从 path_states 选出）
+        // Ensure the target itself is included in the execution set, even if it was selected directly from path_states instead of the queue.
         if !execution_set.iter().any(|e| e.digest == target.digest) {
             if !self.executed.contains(&target.digest) {
                 execution_set.push(target);
             }
         }
 
-        // 步骤4：按时间戳升序排序后提交
-        // 时间戳相同时按轮次升序（确定性排序）
+        // Step 4: sort by ascending timestamp and then commit.
+        // Break ties by ascending round for deterministic ordering.
         execution_set.sort_by_key(|e| (e.timestamp, e.round));
         let certs: Vec<Certificate> = execution_set.iter().map(|e| e.certificate.clone()).collect();
 
-        // 更新已提交记录
+        // Update commit records.
         for e in &execution_set {
             self.executed.insert(e.digest.clone());
             self.last_committed
@@ -356,26 +358,26 @@ impl State {
     }
 }
 
-/// 共识引擎主结构。
-/// 接收来自 primary 层的证书，维护 DAG 和路径状态，
-/// 按时间戳顺序输出已提交的证书序列。
+/// Main consensus engine.
+/// Receives certificates from the primary layer, maintains the DAG and path states,
+/// and outputs the committed certificate sequence ordered by timestamp.
 pub struct Consensus {
-    /// 委员会配置（包含所有节点信息）
+    /// Committee configuration containing all node information
     committee: Committee,
-    /// 垃圾回收深度：超过此深度的旧轮次数据可以清理
+    /// Garbage-collection depth; data older than this depth can be cleaned up
     gc_depth: Round,
-    /// 接收来自 primary core 的证书
+    /// Receives certificates from the primary core
     rx_primary: Receiver<Certificate>,
-    /// 向 primary core 回传已提交的证书（用于触发 GC）
+    /// Sends committed certificates back to the primary core to trigger garbage collection
     tx_primary: Sender<Certificate>,
-    /// 向上层应用输出已提交的证书序列
+    /// Outputs the committed certificate sequence to the upper layer
     tx_output: Sender<Certificate>,
-    /// 创世证书集合（每条路径各一个，round=0）
+    /// Genesis certificate set, one for each path at round 0
     genesis: Vec<Certificate>,
 }
 
 impl Consensus {
-    /// 启动共识引擎（在独立 tokio 任务中运行）。
+    /// Starts the consensus engine in a dedicated tokio task.
     pub fn spawn(
         committee: Committee,
         gc_depth: Round,
@@ -397,7 +399,7 @@ impl Consensus {
         });
     }
 
-    /// 共识主循环：持续接收证书并驱动共识推进。
+    /// Main consensus loop: continuously receives certificates and drives consensus progress.
     async fn run(&mut self) {
         let mut state = State::new(self.genesis.clone());
 
@@ -406,8 +408,8 @@ impl Consensus {
             let round = certificate.round();
             let origin = certificate.origin();
 
-            // 步骤1：将新证书加入 DAG
-            // 按轮次和路径索引存储，供 update_executable 递归查找使用
+            // Step 1: insert the new certificate into the DAG.
+            // Store it by round and path so that update_executable can find it recursively.
             state
                 .round_path_index
                 .entry(round)
@@ -415,48 +417,48 @@ impl Consensus {
                 .insert(origin, certificate.clone());
             state.digest_index.insert(certificate.digest(), certificate.clone());
 
-            // 步骤2：处理冻结结果
-            // 若该证书包含冻结提案且超过 2f+1 节点支持，则冻结对应路径
+            // Step 2: process freeze results.
+            // If this certificate contains a freeze proposal supported by more than 2f+1 nodes, freeze the corresponding path.
             if !certificate.frozen_paths.is_empty() {
                 let cert_clone = certificate.clone();
                 let mut tmp_queue = BinaryHeap::new();
                 state.apply_frozen_paths(&cert_clone, &mut tmp_queue);
-                // 将新增的可执行 header 合并到全局排序队列
+                // Merge the newly executable headers into the global priority queue.
                 for e in tmp_queue { state.executable_queue.push(e); }
             }
 
-            // 步骤3：更新同路径前驱的可执行性
-            // 新证书到来意味着其同路径的前驱 header 可以变为可执行
+            // Step 3: update executability of same-path predecessors.
+            // The arrival of a new certificate means that its same-path predecessor may become executable.
             let mut tmp_queue = BinaryHeap::new();
             state.update_executable(&certificate, &mut tmp_queue);
             for e in tmp_queue { state.executable_queue.push(e); }
 
-            // 步骤4：尝试共识判定
-            // 检查是否满足提交条件（所有路径都有可执行 header），若满足则提交
+            // Step 4: try the consensus decision.
+            // Check whether commit conditions are satisfied; if so, commit the sequence.
             let sequence = state.try_commit();
 
             if sequence.is_empty() {
-                continue; // 条件不满足，等待更多证书
+                continue; // Conditions are not satisfied yet; wait for more certificates.
             }
 
-            // 步骤5：输出已提交的证书序列
+            // Step 5: output the committed certificate sequence.
             for cert in sequence {
                 #[cfg(not(feature = "benchmark"))]
                 info!("Committed {}", cert.header);
 
-                // benchmark 模式下记录每个 payload digest，用于性能分析
+                // In benchmark mode, record each payload digest for performance analysis.
                 #[cfg(feature = "benchmark")]
                 for digest in cert.header.payload.keys() {
                     info!("Committed {} -> {:?}", cert.header, digest);
                 }
 
-                // 通知 primary core 该证书已提交（触发垃圾回收）
+                // Notify the primary core that this certificate has been committed so it can trigger garbage collection.
                 self.tx_primary
                     .send(cert.clone())
                     .await
                     .expect("Failed to send certificate to primary");
 
-                // 输出给上层应用
+                // Output to the upper layer.
                 if let Err(e) = self.tx_output.send(cert).await {
                     warn!("Failed to output certificate: {}", e);
                 }

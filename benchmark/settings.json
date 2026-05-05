@@ -1,9 +1,9 @@
 {
     "provider": "aliyun",
-    "ssh_user": "ubuntu",
+    "ssh_user": "root",
     "key": {
-        "name": "your-keypair-name",
-        "path": "/home/你/.ssh/your-key.pem"
+        "name": "xxx",
+        "path": "/home/xx/.ssh/aws"
     },
     "port": 5000,
     "repo": {
@@ -13,20 +13,54 @@
     },
     "instances": {
         "name": "dag-node",
-        "type": "ecs.c7.large",
+        "type": "ecs.c6.xlarge",
         "regions": [
-            "cn-hangzhou"
+            "cn-hangzhou",
+            "cn-beijing",
+            "cn-qingdao",
+            "cn-shanghai",
+            "cn-shenzhen"
         ]
     },
     "aliyun": {
-        "access_key_id": "你的AK",
-        "access_key_secret": "你的SK",
-        "key_pair_name": "your-keypair-name",
+        "access_key_id": "xxx",
+        "access_key_secret": "xxx",
+        "key_pair_name": "xxx",
         "region_config": {
             "cn-hangzhou": {
-                "security_group_id": "sg-xxx",
-                "vswitch_id": "vsw-xxx",
-                "image_id": "ubuntu_22_04_x64_20G_alibase_20240218.vhd"
+                "security_group_id": "xxx",
+                "vswitch_id": "xxx",
+                "internet_max_bandwidth_out": 5,
+                "internet_charge_type": "PayByTraffic",
+                "image_id": "ubuntu_22_04_x64_20G_alibase_20260316.vhd"
+            },
+            "cn-beijing": {
+                "security_group_id": "xxx",
+                "vswitch_id": "xxx",
+                "internet_max_bandwidth_out": 5,
+                "internet_charge_type": "PayByTraffic",
+                "image_id": "ubuntu_22_04_x64_20G_alibase_20260316.vhd"
+            },
+            "cn-qingdao": {
+                "security_group_id": "xxx",
+                "vswitch_id": "xxx",
+                "internet_max_bandwidth_out": 5,
+                "internet_charge_type": "PayByTraffic",
+                "image_id": "ubuntu_22_04_x64_20G_alibase_20260316.vhd"
+            },
+            "cn-shanghai": {
+                "security_group_id": "xxx",
+                "vswitch_id": "xxxx",
+                "internet_max_bandwidth_out": 5,
+                "internet_charge_type": "PayByTraffic",
+                "image_id": "ubuntu_22_04_x64_20G_alibase_20260316.vhd"
+            },
+            "cn-shenzhen": {
+                "security_group_id": "xx",
+                "vswitch_id": "xxx",
+                "internet_max_bandwidth_out": 5,
+                "internet_charge_type": "PayByTraffic",
+                "image_id": "ubuntu_22_04_x64_20G_alibase_20260316.vhd"
             }
         }
     }

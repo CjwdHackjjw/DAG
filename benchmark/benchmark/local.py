@@ -58,8 +58,8 @@ class LocalBench:
             sleep(0.5)  # Removing the store may take time.
 
             # Recompile the latest code.
-            cmd = CommandMaker.compile().split()
-            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+            cmd = CommandMaker.compile()
+            subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path(), shell=True)
 
             # Create alias for the client and nodes binary.
             cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
@@ -81,8 +81,10 @@ class LocalBench:
 
             # Run the clients (they will wait for the nodes to be ready).
             workers_addresses = committee.workers_addresses(self.faults)
-            rate_share = ceil(rate / committee.workers())
+            node_rates = self.bench_parameters.node_rates(rate, len(workers_addresses))
+            Print.info(f'Node input rates: {node_rates}')
             for i, addresses in enumerate(workers_addresses):
+                rate_share = ceil(node_rates[i] / len(addresses))
                 for id, address in addresses:
                     cmd = CommandMaker.run_client(
                         address,

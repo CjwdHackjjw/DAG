@@ -36,7 +36,7 @@ pub fn mock_committee() -> Committee {
     }
 }
 
-// Fixture: 每个节点每轮一个证书，path_id = author，timestamp = round * 100 + author_index
+// Fixture: one certificate per node per round, with path_id = author and timestamp = round * 100 + author_index
 fn mock_certificate(
     origin: PublicKey,
     round: Round,
@@ -59,12 +59,12 @@ fn mock_certificate(
     }
 }
 
-// 创建一组证书（每个节点一个），返回证书队列和下一轮的 parents
+// Creates a batch of certificates, one per node, and returns the certificate queue and the next round's parents
 fn make_certificates(
     start: Round,
     stop: Round,
     initial_parents: &BTreeSet<Digest>,
-    keys: &[(PublicKey, u64)],  // (公钥, 时间戳偏移)
+    keys: &[(PublicKey, u64)],  // (public key, timestamp offset)
 ) -> (VecDeque<Certificate>, BTreeSet<Digest>) {
     let mut certificates = VecDeque::new();
     let mut parents = initial_parents.iter().cloned().collect::<BTreeSet<_>>();
@@ -83,7 +83,7 @@ fn make_certificates(
     (certificates, next_parents)
 }
 
-// 基本测试：4 个节点各自独立路径，每轮各一个证书，验证共识能正确提交
+// Basic test: four nodes each propose on an independent path, one certificate per round, and consensus should commit correctly
 #[tokio::test]
 async fn commit_basic() {
     let keys: Vec<_> = keys().into_iter().map(|(x, _)| x).collect();
@@ -92,7 +92,7 @@ async fn commit_basic() {
     let genesis = Certificate::genesis(&mock_committee());
     let genesis_digests: BTreeSet<_> = genesis.iter().map(|x| x.digest()).collect();
 
-    // 生成 4 轮证书（每轮 4 个节点），用于触发前几轮可执行性更新
+    // Generate certificates for four rounds, four nodes per round, to trigger executability updates for the first few rounds
     let (mut certificates, _) = make_certificates(1, 4, &genesis_digests, &keys_with_ts);
 
     // Spawn consensus
@@ -108,12 +108,12 @@ async fn commit_basic() {
     );
     tokio::spawn(async move { while rx_primary.recv().await.is_some() {} });
 
-    // 发送所有证书
+    // Send all certificates.
     while let Some(cert) = certificates.pop_front() {
         tx_waiter.send(cert).await.unwrap();
     }
 
-    // 以超时方式等待至少一个提交，避免调度抖动导致的偶发空读
+    // Wait with a timeout for at least one commit to avoid flaky empty reads caused by scheduling jitter.
     let first = tokio::time::timeout(
         tokio::time::Duration::from_secs(2),
         rx_output.recv(),
@@ -129,9 +129,9 @@ async fn commit_basic() {
     while let Ok(cert) = rx_output.try_recv() {
         committed.push(cert);
     }
-    // 应该有来自 round 1, 2, 3 的证书被提交
+    // Certificates from rounds 1, 2, and 3 should be committed.
     assert!(!committed.is_empty(), "Should have committed some certificates");
-    // 验证时间戳排序
+    // Verify timestamp ordering.
     for i in 1..committed.len() {
         assert!(
             committed[i-1].timestamp <= committed[i].timestamp,
@@ -140,7 +140,7 @@ async fn commit_basic() {
     }
 }
 
-// 单路径测试：只有一个节点提案，验证可执行性递归更新
+// Single-path test: only one node proposes, verifying recursive executability updates
 #[tokio::test]
 async fn single_path_commit() {
     let keys: Vec<_> = keys().into_iter().map(|(x, _)| x).collect();
@@ -150,7 +150,7 @@ async fn single_path_commit() {
     let genesis = Certificate::genesis(&committee);
     let genesis_digests: BTreeSet<_> = genesis.iter().map(|x| x.digest()).collect();
 
-    // 创建单节点的 5 轮证书链
+    // Create a single-node certificate chain over five rounds.
     let mut certificates = VecDeque::new();
     let mut parents = genesis_digests.clone();
     for round in 1..=5 {
@@ -182,10 +182,10 @@ async fn single_path_commit() {
         committed.push(cert);
     }
 
-    // round 5 证书到来 -> round 4 可执行
-    // round 4 证书到来 -> round 3 可执行
-    // ... 等等
-    // 验证轮次顺序
+    // When the round-5 certificate arrives, the round-4 header becomes executable.
+    // When the round-4 certificate arrives, the round-3 header becomes executable.
+    // ... and so on.
+    // Verify round ordering.
     if !committed.is_empty() {
         for i in 1..committed.len() {
             assert!(
@@ -210,7 +210,7 @@ async fn commit_with_freeze_path() {
     // 先构造 1..4 轮完整证书
     let (mut certificates, _) = make_certificates(1, 4, &genesis_digests, &keys_with_ts);
 
-    // 在 observer 的第 4 轮证书中注入冻结结果：冻结 target，stall_round = 3
+    // Inject a certificate carrying a freeze result into the observer's round-4 certificate.
     for cert in certificates.iter_mut() {
         if cert.origin() == observer && cert.round() == 4 {
             cert.header.freeze_proposal = Some(FreezeProposal {
@@ -223,7 +223,7 @@ async fn commit_with_freeze_path() {
         }
     }
 
-    // 再追加第 5 轮：仅非 target 路径继续推进
+    // Then append round 5, where only non-target paths continue to advance.
     let round4_parents: BTreeSet<_> = certificates
         .iter()
         .filter(|c| c.round() == 4)
@@ -279,7 +279,7 @@ async fn freeze_certificate_is_accepted_and_order_kept() {
 
     let (mut certificates, _) = make_certificates(1, 4, &genesis_digests, &keys_with_ts);
 
-    // 注入一张带冻结结果的证书
+    // Inject a certificate carrying a freeze result.
     for cert in certificates.iter_mut() {
         if cert.origin() == observer && cert.round() == 4 {
             cert.header.freeze_proposal = Some(FreezeProposal {
@@ -308,7 +308,7 @@ async fn freeze_certificate_is_accepted_and_order_kept() {
         committed.push(cert);
     }
 
-    // 至少有提交，且保持时间戳非递减
+    // There should be at least one commit, and timestamps should remain non-decreasing.
     assert!(!committed.is_empty(), "Should commit under freeze certificate input");
     for i in 1..committed.len() {
         assert!(committed[i - 1].timestamp <= committed[i].timestamp);

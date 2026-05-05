@@ -1,62 +1,127 @@
+# FREE
 
-# Release DAG
-
-
+FREE is a Rust implementation of a DAG-based protocol with Fabric-based benchmarking scripts.
 
 ## Quick Start
 
-The core protocols are written in Rust, but all benchmarking scripts are written in Python and run with [Fabric](http://www.fabfile.org/).
-To deploy and benchmark a testbed of 4 nodes on your local machine, clone the repo and install the python dependencies:
+### Requirements
 
-```
-$ git clone https://github.com/asonnino/narwhal.git
-$ cd narwhal/benchmark
-$ pip install -r requirements.txt
-```
+Install:
 
-You also need to install Clang (required by rocksdb) and [tmux](https://linuxize.com/post/getting-started-with-tmux/#installing-tmux) (which runs all nodes and clients in the background). Finally, run a local benchmark using fabric:
+- Rust toolchain
+- Python 3 + `pip`
+- `tmux`
+- `clang`
+- build tools
 
-```
-$ fab local
-```
+Example on Ubuntu/Debian:
 
-This command may take a long time the first time you run it (compiling rust code in `release` mode may be slow) and you can customize a number of benchmark parameters in `fabfile.py`. When the benchmark terminates, it displays a summary of the execution similarly to the one below.
-
-```
------------------------------------------
- SUMMARY:
------------------------------------------
- + CONFIG:
- Faults: 0 node(s)
- Committee size: 4 node(s)
- Worker(s) per node: 1 worker(s)
- Collocate primary and workers: True
- Input rate: 50,000 tx/s
- Transaction size: 512 B
- Execution time: 19 s
-
- Header size: 1,000 B
- Max header delay: 100 ms
- GC depth: 50 round(s)
- Sync retry delay: 10,000 ms
- Sync retry nodes: 3 node(s)
- batch size: 500,000 B
- Max batch delay: 100 ms
-
- + RESULTS:
- Consensus TPS: 46,478 tx/s
- Consensus BPS: 23,796,531 B/s
- Consensus latency: 464 ms
-
- End-to-end TPS: 46,149 tx/s
- End-to-end BPS: 23,628,541 B/s
- End-to-end latency: 557 ms
------------------------------------------
+```bash
+sudo apt update
+sudo apt install -y build-essential clang cmake pkg-config libssl-dev tmux python3 python3-pip
 ```
 
-## Next Steps
+Install Python benchmark dependencies:
+
+```bash
+cd /home/DAG/Opencode/FREE/benchmark
+pip3 install -r requirements.txt
+```
+
+Build the project:
+
+```bash
+cd /home/DAG/Opencode/FREE
+cargo build --release
+```
+
+## Reproduce Experiments
+
+### 1. Local experiment
+
+```bash
+cd /home/DAG/Opencode/FREE/benchmark
+fab local
+```
+
+Current local preset in `benchmark/fabfile.py`:
+
+- `faults = 0`
+- `nodes = 5`
+- `workers = 1`
+- `rate = 50000`
+- `tx_size = 512`
+- `duration = 20`
+- `freeze_check_interval = 15`
+
+### 2. Default remote experiment
+
+Remote settings are read from `benchmark/settings.json`.
+Make sure the SSH key, cloud credentials, image IDs, and repo branch are correct before running.
+
+Typical workflow:
+
+```bash
+cd /home/DAG/Opencode/FREE/benchmark
+fab create
+fab start
+fab info
+fab install
+fab remote
+```
+
+Clean up:
+
+```bash
+fab stop
+fab destroy
+```
+
+### 3. Other experiment tasks
+
+All of the following are defined in `benchmark/fabfile.py`:
+
+```bash
+fab remote_freeze
+fab remote_duration
+fab remote_imbalance
+fab plot
+fab logs
+fab kill
+```
+
+What they do:
+
+- `fab remote_freeze`: sweep `freeze_check_interval`
+- `fab remote_duration`: sweep experiment duration
+- `fab remote_imbalance`: compare balanced vs imbalanced client load
+- `fab plot`: generate plots from result files
+- `fab logs`: print parsed log summary
+- `fab kill`: stop remote benchmark processes
+
+## Where to change parameters
+
+Edit `benchmark/fabfile.py` if you want to change:
+
+- `faults`
+- `nodes`
+- `workers`
+- `rate`
+- `duration`
+- `runs`
+- `header_size`
+- `max_header_delay`
+- `batch_size`
+- `freeze_check_interval`
+- `node_rate_weights`
+
+## Results
+
+Benchmark outputs are typically written under:
+
+- `benchmark/results/`
 
 
 ## License
 
-This software is licensed as [Apache 2.0](LICENSE).
+Licensed under [Apache 2.0](LICENSE).

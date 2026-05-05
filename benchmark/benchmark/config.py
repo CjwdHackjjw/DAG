@@ -217,6 +217,15 @@ class BenchParameters:
             self.duration = int(json['duration'])
 
             self.runs = int(json['runs']) if 'runs' in json else 1
+
+            if 'node_rate_weights' in json:
+                weights = json['node_rate_weights']
+                weights = weights if isinstance(weights, list) else [weights]
+                if not weights:
+                    raise ConfigError('Missing node rate weights')
+                self.node_rate_weights = [int(x) for x in weights]
+            else:
+                self.node_rate_weights = None
         except KeyError as e:
             raise ConfigError(f'Malformed bench parameters: missing key {e}')
 
@@ -225,6 +234,22 @@ class BenchParameters:
 
         if min(self.nodes) <= self.faults:
             raise ConfigError('There should be more nodes than faults')
+        if self.node_rate_weights is not None:
+            if len(self.node_rate_weights) < max(self.nodes):
+                raise ConfigError('Node rate weights must cover the maximum number of nodes')
+            if any(x <= 0 for x in self.node_rate_weights):
+                raise ConfigError('Node rate weights must be positive')
+
+    def node_rates(self, total_rate, nodes):
+        assert isinstance(total_rate, int) and total_rate >= 0
+        assert isinstance(nodes, int) and nodes > 0
+        weights = self.node_rate_weights[:nodes] if self.node_rate_weights else [1] * nodes
+        total_weight = sum(weights)
+        rates = [(total_rate * weight) // total_weight for weight in weights]
+        remainder = total_rate - sum(rates)
+        for i in range(remainder):
+            rates[i % nodes] += 1
+        return rates
 
 
 class PlotParameters:

@@ -54,24 +54,24 @@ class Bench:
     def install(self):
         Print.info('Installing rust and cloning the repo...')
         cmd = [
+            'while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 3; done',
             'sudo apt-get update',
-            'sudo apt-get -y upgrade',
             'sudo apt-get -y autoremove',
+            'sudo apt-get -y install build-essential cmake pkg-config zlib1g-dev clang',
 
-            # The following dependencies prevent the error: [error: linker `cc` not found].
-            'sudo apt-get -y install build-essential',
-            'sudo apt-get -y install cmake',
-
-            # Install rust (non-interactive).
-            'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y',
-            'source $HOME/.cargo/env',
+            # rustup via rsproxy
+            'export RUSTUP_DIST_SERVER=https://rsproxy.cn && export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup',
+            'if [ ! -x "$HOME/.cargo/bin/rustup" ]; then curl --proto "=https" --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y; fi',
+            '. $HOME/.cargo/env',
+            'mkdir -p $HOME/.cargo',
+            "printf '[source.crates-io]\nreplace-with = \"rsproxy\"\n\n[source.rsproxy]\nregistry = \"sparse+https://rsproxy.cn/index/\"\n\n[registries.rsproxy]\nindex = \"sparse+https://rsproxy.cn/index/\"\n' > $HOME/.cargo/config.toml",
             'rustup default stable',
 
-            # This is missing from the Rocksdb installer (needed for Rocksdb).
-            'sudo apt-get install -y clang',
-
-            # Clone the repo.
-            f'(git clone {self.settings.repo_url} || (cd {self.settings.repo_name} ; git pull))'
+            # Clone/update repo with retry and mirror fallback.
+            'git config --global http.version HTTP/1.1',
+            f'if [ -d "{self.settings.repo_name}" ] && [ ! -d "{self.settings.repo_name}/.git" ]; then rm -rf "{self.settings.repo_name}"; fi',
+            f'for i in 1 2 3; do if [ -d "{self.settings.repo_name}/.git" ]; then (cd "{self.settings.repo_name}" && git fetch -f origin "{self.settings.branch}" && git checkout -B "{self.settings.branch}" FETCH_HEAD); else rm -rf "{self.settings.repo_name}"; (git clone --depth 1 --branch "{self.settings.branch}" "{self.settings.repo_url}" "{self.settings.repo_name}" || git clone --depth 1 --branch "{self.settings.branch}" "{self.settings.repo_url.replace("https://github.com/", "https://gitclone.com/github.com/")}" "{self.settings.repo_name}"); fi; [ -d "{self.settings.repo_name}/.git" ] && break; sleep 5; done',
+            f'test -d "{self.settings.repo_name}/.git"',
         ]
         hosts = self.manager.hosts(flat=True)
         try:
@@ -81,6 +81,37 @@ class Bench:
         except (GroupException, ExecutionError) as e:
             e = FabricError(e) if isinstance(e, GroupException) else e
             raise BenchError('Failed to install repo on testbed', e)
+
+    # def install(self):
+    #     Print.info('Installing rust and cloning the repo...')
+    #     cmd = [
+    #         'sudo apt-get update',
+    #         'sudo apt-get -y upgrade',
+    #         'sudo apt-get -y autoremove',
+
+    #         # The following dependencies prevent the error: [error: linker `cc` not found].
+    #         'sudo apt-get -y install build-essential',
+    #         'sudo apt-get -y install cmake',
+
+    #         # Install rust via rsproxy (non-interactive).
+    #         'export RUSTUP_DIST_SERVER=https://rsproxy.cn && export RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup && curl --proto "=https" --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y',
+    #         'source $HOME/.cargo/env',
+    #         'rustup default stable',
+
+    #         # This is missing from the Rocksdb installer (needed for Rocksdb).
+    #         'sudo apt-get install -y clang',
+
+    #         # Clone the repo.
+    #         f'git config --global http.version HTTP/1.1 && if [ -d {self.settings.repo_name} ] && [ ! -d {self.settings.repo_name}/.git ]; then rm -rf {self.settings.repo_name}; fi && for i in 1 2 3; do ([ -d {self.settings.repo_name}/.git ] && (cd {self.settings.repo_name} && git pull)) || git clone --depth 1 {self.settings.repo_url} {self.settings.repo_name}; [ -d {self.settings.repo_name}/.git ] && break; sleep 5; done'
+    #     ]
+    #     hosts = self.manager.hosts(flat=True)
+    #     try:
+    #         g = Group(*hosts, user=self.settings.ssh_user, connect_kwargs=self.connect)
+    #         g.run(' && '.join(cmd), hide=False)
+    #         Print.heading(f'Initialized testbed of {len(hosts)} nodes')
+    #     except (GroupException, ExecutionError) as e:
+    #         e = FabricError(e) if isinstance(e, GroupException) else e
+    #         raise BenchError('Failed to install repo on testbed', e)
 
     def kill(self, hosts=[], delete_logs=False):
         assert isinstance(hosts, list)
@@ -131,10 +162,16 @@ class Bench:
 
     def _background_run(self, host, command, log_file):
         name = splitext(basename(log_file))[0]
-        cmd = f'tmux new -d -s "{name}" "{command} |& tee {log_file}"'
+        cmd = f'tmux new -d -s "{name}" "cd $HOME && {command} |& tee {log_file}"'
         c = Connection(host, user=self.settings.ssh_user, connect_kwargs=self.connect)
         output = c.run(cmd, hide=True)
         self._check_stderr(output)
+
+        # Ensure command did not fail immediately after tmux session creation.
+        check = c.run(f'sleep 1; tmux has-session -t "{name}"', warn=True, hide=True)
+        if not check.ok:
+            log = c.run(f'test -f {log_file} && tail -n 20 {log_file} || true', warn=True, hide=True)
+            raise ExecutionError(log.stdout or f'Tmux session {name} exited immediately')
 
     def _update(self, hosts, collocate):
         if collocate:
@@ -146,14 +183,16 @@ class Bench:
             f'Updating {len(ips)} machines (branch "{self.settings.branch}")...'
         )
         cmd = [
-            f'(cd {self.settings.repo_name} && git fetch -f)',
-            f'(cd {self.settings.repo_name} && git checkout -f {self.settings.branch})',
-            f'(cd {self.settings.repo_name} && git pull -f)',
+            # f'(cd {self.settings.repo_name} && git fetch -f origin {self.settings.branch})',
+            # f'(cd {self.settings.repo_name} && git checkout -B {self.settings.branch} FETCH_HEAD)',
+            f'(cd {self.settings.repo_name} && git checkout {self.settings.branch})',
             'source $HOME/.cargo/env',
             f'(cd {self.settings.repo_name}/node && {CommandMaker.compile()})',
+            f'(cd {self.settings.repo_name} && test -x target/release/node && test -x target/release/benchmark_client)',
             CommandMaker.alias_binaries(
                 f'./{self.settings.repo_name}/target/release/'
-            )
+            ),
+            'test -x ./node && test -x ./benchmark_client',
         ]
         g = Group(*ips, user=self.settings.ssh_user, connect_kwargs=self.connect)
         g.run(' && '.join(cmd), hide=True)
@@ -166,8 +205,8 @@ class Bench:
         subprocess.run([cmd], shell=True, stderr=subprocess.DEVNULL)
 
         # Recompile the latest code.
-        cmd = CommandMaker.compile().split()
-        subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path())
+        cmd = CommandMaker.compile()
+        subprocess.run(cmd, check=True, cwd=PathMaker.node_crate_path(), shell=True)
 
         # Create alias for the client and nodes binary.
         cmd = CommandMaker.alias_binaries(PathMaker.binary_path())
@@ -222,8 +261,10 @@ class Bench:
         # for the faulty nodes to be online).
         Print.info('Booting clients...')
         workers_addresses = committee.workers_addresses(faults)
-        rate_share = ceil(rate / committee.workers())
+        node_rates = bench_parameters.node_rates(rate, len(workers_addresses))
+        Print.info(f'Node input rates: {node_rates}')
         for i, addresses in enumerate(workers_addresses):
+            rate_share = ceil(node_rates[i] / len(addresses))
             for (id, address) in addresses:
                 host = Committee.ip(address)
                 cmd = CommandMaker.run_client(

@@ -11,11 +11,11 @@ pub struct VotesAggregator {
     weight: Stake,
     votes: Vec<(PublicKey, Signature)>,
     used: HashSet<PublicKey>,
-    /// 收集所有投票的时间戳，用于计算中位数
+    /// Collects all vote timestamps for median calculation
     timestamps: Vec<u64>,
-    /// 收集冻结投票结果
+    /// Collects freeze vote results
     freeze_votes: HashMap<PublicKey, bool>,
-    /// 支持冻结的总 stake
+    /// Total stake supporting freeze
     freeze_support_weight: Stake,
 }
 
@@ -42,10 +42,10 @@ impl VotesAggregator {
         // Ensure it is the first time this authority votes.
         ensure!(self.used.insert(author), DagError::AuthorityReuse(author));
 
-        // 收集时间戳
+        // Collect the timestamp.
         self.timestamps.push(vote.timestamp);
 
-        // 收集冻结投票
+        // Collect the freeze vote.
         if header.freeze_proposal.is_some() {
             self.freeze_votes.insert(author, vote.freeze_support);
             if vote.freeze_support {
@@ -58,10 +58,10 @@ impl VotesAggregator {
         if self.weight >= committee.quorum_threshold() {
             self.weight = 0; // Ensures quorum is only reached once.
 
-            // 计算时间戳中位数
+            // Calculate the median timestamp.
             let median_ts = Certificate::calculate_median_timestamp(&self.timestamps);
 
-            // 判断是否冻结
+            // Decide whether the path should be frozen.
             let mut frozen_paths = HashSet::new();
             if let Some(freeze_proposal) = &header.freeze_proposal {
                 if self.freeze_support_weight >= committee.quorum_threshold() {

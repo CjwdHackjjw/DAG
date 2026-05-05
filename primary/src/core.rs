@@ -56,17 +56,17 @@ pub struct Core {
     last_voted: HashMap<Round, HashSet<PublicKey>>,
     /// The set of headers we are currently processing.
     processing: HashMap<Round, HashSet<Digest>>,
-    /// 记录每轮收到过哪些作者的 header（用于判断“是否收到 i+1 轮提案”）
+    /// Records which authors' headers have been received in each round, used to determine whether an i+1 proposal has been observed
     seen_headers: HashMap<Round, HashSet<PublicKey>>,
-    /// 等待冻结结果的路径：target_path -> stall_round
+    /// Paths waiting for freeze results: target_path -> stall_round
     pending_freezes: HashMap<PublicKey, Round>,
-    /// 因等待冻结结果而暂缓投票的 header
+    /// Headers whose votes are deferred while waiting for freeze results
     deferred_headers: HashMap<PublicKey, Vec<Header>>,
     /// The last header we proposed (for which we are waiting votes).
     current_header: Header,
     /// Aggregates votes into a certificate.
     votes_aggregator: VotesAggregator,
-    /// 已冻结的路径集合：路径公钥 -> 冻结轮次（该轮次及之后的 header 不再被接受）
+    /// Frozen paths: path public key -> freeze round. Headers at or after that round are no longer accepted
     frozen_paths: HashMap<PublicKey, Round>,
     /// A network sender to send the batches to the other workers.
     network: ReliableSender,
@@ -151,7 +151,7 @@ impl Core {
     async fn process_header(&mut self, header: &Header) -> DagResult<()> {
         debug!("Processing {:?}", header);
 
-        // 记录：该轮次已收到该作者的 header（用于判断 i+1 轮提案是否收到）
+        // Record that we have received this author's header in this round, used to determine whether an i+1 proposal has been observed.
         self.seen_headers
             .entry(header.round)
             .or_insert_with(HashSet::new)
@@ -172,8 +172,8 @@ impl Core {
             return Ok(());
         }
 
-        // 新方案：每个路径独立提案，parents 可以来自不同轮次的不同路径。
-        // 只需验证 parents 确实存在（synchronizer 已保证），不限制轮次大小。
+        // New design: each path proposes independently, and parents may come from different paths at different rounds.
+        // We only need to verify that the parents exist, which the synchronizer already guarantees, without restricting their rounds.
         let _ = parents;
 
         // Ensure we have the payload. If we don't, the synchronizer will ask our workers to get it, and then
@@ -187,7 +187,7 @@ impl Core {
         let bytes = bincode::serialize(header).expect("Failed to serialize header");
         self.store.write(header.id.to_vec(), bytes).await;
 
-        // 若该作者路径正在等待冻结结果，则先暂缓投票（等结果出来再决定是否补投）
+        // If this author's path is waiting for a freeze result, defer the vote for now and decide whether to send it later once the result arrives.
         if self.pending_freezes.contains_key(&header.author) {
             self.deferred_headers
                 .entry(header.author)
@@ -207,8 +207,8 @@ impl Core {
             .or_insert_with(HashSet::new)
             .insert(header.author)
         {
-            // Determine freeze_support: 判断是否支持冻结提案
-            // 规则：看自己有没有收到目标路径在 i+1 轮的提案
+            // Determine freeze_support: whether this node supports the freeze proposal.
+            // Rule: check whether we have observed the target path's proposal in round i+1.
             let freeze_support = if let Some(fp) = &header.freeze_proposal {
                 let target_round = fp.stall_round + 1;
                 let seen_target_header = self.seen_headers
@@ -216,7 +216,7 @@ impl Core {
                     .map(|authors| authors.contains(&fp.target_path))
                     .unwrap_or(false);
 
-                // 进入“等待冻结结果”状态（对目标路径后续 header 暂缓投票）
+                // Enter the "waiting for freeze result" state and temporarily defer votes for subsequent headers on the target path.
                 self.pending_freezes.insert(fp.target_path, fp.stall_round);
                 !seen_target_header
             } else {
@@ -318,14 +318,15 @@ impl Core {
         let bytes = bincode::serialize(&certificate).expect("Failed to serialize certificate");
         self.store.write(certificate.digest().to_vec(), bytes).await;
 
-        // 新方案：每收到一个有效 certificate 就立刻通知 Proposer 更新该路径的最新证书。
-        // 不再等待 2f+1 quorum，各路径独立推进。
+        // New design: as soon as a valid certificate is received, immediately notify the proposer
+        // to update the latest certificate on that path. We no longer wait for a 2f+1 quorum,
+        // and each path advances independently.
         self.tx_proposer
             .send((vec![certificate.clone()], certificate.round()))
             .await
             .expect("Failed to send certificate to proposer");
 
-        // 更新冻结路径记录：如果证书包含冻结结果，记录冻结轮次
+        // Update frozen-path records: if the certificate contains freeze results, record the freeze round.
         for frozen_path in &certificate.frozen_paths {
             let freeze_round = certificate.header.freeze_proposal
                 .as_ref()
@@ -337,28 +338,28 @@ impl Core {
             debug!("Path {:?} is now frozen from round {}", frozen_path, freeze_round);
         }
 
-        // 冻结结果决议完成：
-        // - 冻结通过：继续不支持该路径（deferred 丢弃）
-        // - 冻结未通过：补投之前暂缓的 header
+        // Freeze result resolved:
+        // - If the freeze passes, keep rejecting that path and drop deferred headers.
+        // - If the freeze fails, send votes for the headers that were previously deferred.
         if let Some(fp) = &certificate.header.freeze_proposal {
             let target = fp.target_path;
             let frozen = certificate.frozen_paths.contains(&target);
 
-            // 清除 pending freeze 状态
+            // Clear the pending-freeze state.
             self.pending_freezes.remove(&target);
 
             if frozen {
-                // 冻结通过：丢弃暂缓队列
+                // Freeze passed: drop the deferred queue.
                 self.deferred_headers.remove(&target);
                 debug!("Freeze passed for path {:?}, deferred headers dropped", target);
             } else {
-                // 冻结没通过：补投暂缓的 header
+                // Freeze rejected: vote on the deferred headers.
                 if let Some(mut deferred) = self.deferred_headers.remove(&target) {
-                    // 按轮次顺序补投
+                    // Replay deferred votes in round order.
                     deferred.sort_by_key(|h| h.round);
                     for h in deferred {
                         debug!("Freeze rejected, resume voting for deferred header {}", h.id);
-                        // 只在未冻结且未投过该轮该作者时才补投
+                        // Replay only if the path is not frozen and we have not already voted for this author in that round.
                         if self.frozen_paths.get(&h.author).map(|r| h.round >= *r).unwrap_or(false) {
                             continue;
                         }
@@ -409,7 +410,7 @@ impl Core {
             DagError::TooOld(header.id.clone(), header.round)
         );
 
-        // 拒绝已冻结路径上的 header（冻结轮次及之后的 header 不再被接受）
+        // Reject headers on frozen paths: headers at or after the freeze round are no longer accepted.
         if let Some(&freeze_round) = self.frozen_paths.get(&header.author) {
             ensure!(
                 header.round < freeze_round,

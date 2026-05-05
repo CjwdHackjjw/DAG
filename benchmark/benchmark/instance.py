@@ -17,6 +17,7 @@ try:
     from aliyunsdkecs.request.v20140526.DescribeInstancesRequest import DescribeInstancesRequest
     from aliyunsdkecs.request.v20140526.StartInstanceRequest import StartInstanceRequest
     from aliyunsdkecs.request.v20140526.StopInstanceRequest import StopInstanceRequest
+    from aliyunsdkecs.request.v20140526.AllocatePublicIpAddressRequest import AllocatePublicIpAddressRequest
 except ImportError:
     AcsClient = None
     ClientException = Exception
@@ -194,21 +195,21 @@ class AliyunInstanceManager:
         self.settings = settings
         self.clients = OrderedDict((r, AcsClient(settings.aliyun_access_key_id, settings.aliyun_access_key_secret, r)) for r in settings.regions)
 
-    def _describe(self, region, statuses=None):
+    def _describe(self, region):
         req = DescribeInstancesRequest()
         req.set_accept_format('json')
-        req.set_RegionId(region)
         req.set_InstanceName(self.settings.instance_name)
-        if statuses:
-            req.set_Statuses(statuses)
         return json.loads(self.clients[region].do_action_with_exception(req))
 
     def _get(self, statuses):
         ids, ips = defaultdict(list), defaultdict(list)
+        wanted = set(statuses or [])
         for region in self.clients:
             try:
-                instances = self._describe(region, statuses).get('Instances', {}).get('Instance', [])
+                instances = self._describe(region).get('Instances', {}).get('Instance', [])
                 for inst in instances:
+                    if wanted and inst.get('Status') not in wanted:
+                        continue
                     iid = inst.get('InstanceId')
                     if iid:
                         ids[region].append(iid)
@@ -226,6 +227,35 @@ class AliyunInstanceManager:
             if sum(len(v) for v in ids.values()) == 0:
                 break
 
+    def _start_instance(self, region, instance_id):
+        for _ in range(30):
+            try:
+                req = StartInstanceRequest(); req.set_accept_format('json'); req.set_InstanceId(instance_id)
+                self.clients[region].do_action_with_exception(req)
+                return
+            except (ClientException, ServerException) as e:
+                if 'IncorrectInstanceStatus' in str(e):
+                    sleep(2)
+                    continue
+                raise
+        raise AliyunError(f'Failed to start instance {instance_id}: status not ready')
+
+    def _allocate_public_ip(self, region, instance_id):
+        for _ in range(30):
+            try:
+                req = AllocatePublicIpAddressRequest(); req.set_accept_format('json'); req.set_InstanceId(instance_id)
+                self.clients[region].do_action_with_exception(req)
+                return
+            except (ClientException, ServerException) as e:
+                msg = str(e)
+                if 'IncorrectInstanceStatus' in msg:
+                    sleep(2)
+                    continue
+                if 'InvalidOperation.IpNotInCreating' in msg or 'InvalidInstanceId.NotFound' in msg:
+                    sleep(2)
+                    continue
+                raise
+
     def create_instances(self, instances):
         assert isinstance(instances, int) and instances > 0
         try:
@@ -235,7 +265,6 @@ class AliyunInstanceManager:
                 for _ in range(instances):
                     req = CreateInstanceRequest()
                     req.set_accept_format('json')
-                    req.set_RegionId(region)
                     req.set_InstanceType(self.settings.instance_type)
                     req.set_SecurityGroupId(cfg['security_group_id'])
                     req.set_VSwitchId(cfg['vswitch_id'])
@@ -249,8 +278,8 @@ class AliyunInstanceManager:
                     req.set_KeyPairName(self.settings.aliyun_key_pair_name)
                     iid = json.loads(self.clients[region].do_action_with_exception(req)).get('InstanceId')
                     if iid:
-                        s = StartInstanceRequest(); s.set_accept_format('json'); s.set_InstanceId(iid)
-                        self.clients[region].do_action_with_exception(s)
+                        self._allocate_public_ip(region, iid)
+                        self._start_instance(region, iid)
             Print.info('Waiting for all instances to boot...')
             self._wait(['Starting'])
             Print.heading(f'Successfully created {size} new instances')

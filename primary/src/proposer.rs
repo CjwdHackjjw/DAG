@@ -102,8 +102,8 @@ impl Proposer {
     }
 
     async fn make_header(&mut self) {
-        // 构建 parents：引用所有节点对应路径最新的证书
-        // 已冻结的路径直接跳过，不再引用
+        // Build parents by referencing the latest certificate on each node's path.
+        // Skip frozen paths because they should no longer be referenced.
         let mut parents = std::collections::BTreeSet::new();
         for state in self.path_states.values() {
             if state.is_frozen {
@@ -114,7 +114,7 @@ impl Proposer {
             }
         }
 
-        // 生成冻结提案（如果需要）
+        // Generate a freeze proposal if needed.
         let freeze_proposal = self.generate_freeze_proposal().await;
 
         // Make a new header.
@@ -141,11 +141,11 @@ impl Proposer {
             .await
             .expect("Failed to send header");
 
-        // 记录自己路径最新已提案轮次
+        // Record the latest round proposed on our own path.
         self.last_proposed_round = self.round;
     }
 
-    /// 生成冻结提案（如果需要）
+    /// Generates a freeze proposal if needed.
     async fn generate_freeze_proposal(&mut self) -> Option<FreezeProposal> {
         let m = self.freeze_check_interval;
 
@@ -154,26 +154,26 @@ impl Proposer {
                 continue;
             }
 
-            // 获取目标路径最新轮次
+            // Get the latest round of the target path.
             let target_latest_round = path_state.latest_certificate
                 .as_ref()
                 .map(|c| c.round())
                 .unwrap_or(0);
 
-            // 先检查自己轮次和目标路径轮次差是否至少 m，不满足则目标路径尚未停滞
+            // First check whether our round is at least m rounds ahead of the target path; otherwise the target path is not stalled yet.
             if self.round < target_latest_round + m {
                 continue;
             }
 
-            // stall_round：目标路径停滞的那一轮（最新已知轮次）
+            // stall_round is the round where the target path stalled, i.e., its latest known round.
             let stall_round = target_latest_round;
 
-            // 计算当前轮是否恰好是某个检查点：(self.round - stall_round) 必须是 m 的整数倍
+            // Check whether the current round is exactly a checkpoint: (self.round - stall_round) must be a multiple of m.
             let diff = self.round.saturating_sub(stall_round);
             if diff == 0 || diff % m != 0 {
                 continue;
             }
-            let k = diff / m; // 第 k 个检查点（k >= 1）
+            let k = diff / m; // The k-th checkpoint (k >= 1).
 
             let observer = self.select_observer(target_path, stall_round, k as u64);
             if observer == self.name {
@@ -188,23 +188,23 @@ impl Proposer {
         None
     }
 
-    /// 观察节点选择算法
+    /// Observer selection algorithm.
     fn select_observer(&self, target_path: &PublicKey, stall_round: Round, k: u64) -> PublicKey {
         let check_round = stall_round + k * self.freeze_check_interval;
 
-        // 构建种子：target_path_pub + stall_round + k*m
+        // Build the seed from target_path_pub + stall_round + k*m.
         let mut seed_data = Vec::new();
         seed_data.extend_from_slice(&target_path.0);
         seed_data.extend_from_slice(&stall_round.to_le_bytes());
         seed_data.extend_from_slice(&check_round.to_le_bytes());
 
-        // 计算哈希作为随机种子
+        // Hash the seed data to derive a random seed.
         let hash_result = Sha512::digest(&seed_data);
         let seed = u64::from_le_bytes(
             hash_result[..8].try_into().unwrap_or([0; 8])
         );
 
-        // 在 n-1 个节点中随机选择（排除目标节点本身）
+        // Randomly select one of the n-1 nodes, excluding the target node itself.
         let mut candidates: Vec<_> = self.committee.authorities.keys()
             .filter(|name| *name != target_path)
             .copied()
@@ -225,24 +225,24 @@ impl Proposer {
         tokio::pin!(timer);
 
         loop {
-            // 提案条件：
-            // 1. 自己路径上一轮已经有了证书（自身路径的上一轮 certificate 已存在）
-            // 2. payload 足够 或 timer 超时
+            // Proposal conditions:
+            // 1. The previous-round certificate on our own path is ready.
+            // 2. Either the payload is large enough or the timer has expired.
             let own_prev_cert_ready = self.path_states
                 .get(&self.name)
                 .and_then(|ps| ps.latest_certificate.as_ref())
                 .map(|c| c.round() == self.round - 1)
-                .unwrap_or(self.round == 1); // round 1 时创世证书已就绪
+                .unwrap_or(self.round == 1); // The genesis certificate is ready at round 1.
 
-            // 约束：只有自己路径上一轮已经“生成提案”才允许进入下一轮提案（round 1 例外）
+            // Constraint: moving to the next proposal round is allowed only after our own path has produced a proposal in the previous round, except for round 1.
             let own_prev_proposed_ready = self.round == 1 || self.last_proposed_round >= self.round - 1;
 
             let enough_digests = self.payload_size >= self.header_size;
             let timer_expired = timer.is_elapsed();
 
-            // 同一轮第一次提案可以由 payload 满或 timer 触发；
-            // 若这一轮已经提案过，则只允许 timer 到期后重提，
-            // 避免迟到投票还在返回时又被新 payload 立即触发替换当前提案。
+            // The first proposal in a round can be triggered by a full payload or by timer expiration.
+            // If this round has already been proposed, allow reproposal only after the timer expires
+            // to avoid replacing the current proposal immediately with a new payload while late votes are still arriving.
             let round_already_proposed = self.last_proposed_round == self.round;
             let proposal_trigger = if round_already_proposed {
                 timer_expired
@@ -262,12 +262,12 @@ impl Proposer {
 
             tokio::select! {
                 Some((certs, _round)) = self.rx_core.recv() => {
-                    // 更新各路径最新证书
+                    // Update the latest certificate for each path.
                     for cert in certs {
                         let path_id = cert.header.path_id;
                         let cert_round = cert.round();
 
-                        // 更新冻结状态：如果证书包含冻结结果
+                        // Update freeze state if the certificate contains freeze results.
                         for frozen_path in &cert.frozen_paths {
                             let freeze_round = cert.header.freeze_proposal
                                 .as_ref()
@@ -282,14 +282,14 @@ impl Proposer {
                             }
                         }
 
-                        // 更新路径状态
+                        // Update the path state.
                         let ps = self.path_states
                             .entry(path_id)
                             .or_insert_with(|| ProposalPathState::new(path_id));
 
                         ps.update_latest_certificate(cert.clone());
 
-                        // 如果是自己路径的证书，推进本地轮次
+                        // Advance the local round if this certificate belongs to our own path.
                         if path_id == self.name {
                             if cert_round >= self.round {
                                 self.round = cert_round + 1;

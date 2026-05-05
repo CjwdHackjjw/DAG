@@ -11,12 +11,12 @@ use std::convert::TryInto;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// 冻结提案信息
+/// Freeze proposal metadata
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct FreezeProposal {
-    pub target_path: PublicKey,  // 被冻结的路径
-    pub stall_round: Round,      // 停滞轮次
-    pub observer: PublicKey,     // 观察节点
+    pub target_path: PublicKey,  // Path to be frozen
+    pub stall_round: Round,      // Round where the path stalled
+    pub observer: PublicKey,     // Observer node
 }
 
 #[derive(Clone, Serialize, Deserialize, Default)]
@@ -27,8 +27,8 @@ pub struct Header {
     pub parents: BTreeSet<Digest>,
     pub id: Digest,
     pub signature: Signature,
-    pub path_id: PublicKey,                      // 该节点的提案路径标识
-    pub freeze_proposal: Option<FreezeProposal>, // 冻结提案信息
+    pub path_id: PublicKey,                      // Proposal path identifier of this node
+    pub freeze_proposal: Option<FreezeProposal>, // Freeze proposal metadata
 }
 
 impl Header {
@@ -57,7 +57,7 @@ impl Header {
             parents,
             id: Digest::default(),
             signature: Signature::default(),
-            path_id: author,  // 默认路径 ID 就是作者
+            path_id: author,  // By default, the path ID is the author.
             freeze_proposal,
         };
         let id = header.digest();
@@ -142,8 +142,8 @@ pub struct Vote {
     pub origin: PublicKey,
     pub author: PublicKey,
     pub signature: Signature,
-    pub timestamp: u64,  // 投票者的本地时间戳（毫秒）
-    pub freeze_support: bool,  // 是否支持冻结
+    pub timestamp: u64,  // Voter's local timestamp in milliseconds
+    pub freeze_support: bool,  // Whether this vote supports freezing
 }
 
 impl Vote {
@@ -220,9 +220,9 @@ impl fmt::Debug for Vote {
 pub struct Certificate {
     pub header: Header,
     pub votes: Vec<(PublicKey, Signature)>,
-    pub timestamp: u64,  // 所有投票时间戳的中位数
-    pub freeze_votes: HashMap<PublicKey, bool>,  // 冻结投票结果（节点 -> 是否支持冻结）
-    pub frozen_paths: HashSet<PublicKey>,  // 被冻结的节点路径集合
+    pub timestamp: u64,  // Median of all vote timestamps
+    pub freeze_votes: HashMap<PublicKey, bool>,  // Freeze vote results: node -> whether it supports freezing
+    pub frozen_paths: HashSet<PublicKey>,  // Set of frozen node paths
 }
 
 impl Certificate {
@@ -241,7 +241,7 @@ impl Certificate {
             .collect()
     }
 
-    /// 计算时间戳中位数
+    /// Calculates the median timestamp
     pub fn calculate_median_timestamp(timestamps: &[u64]) -> u64 {
         if timestamps.is_empty() {
             return 0;
